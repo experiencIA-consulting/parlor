@@ -29,12 +29,16 @@
     font-family: var(--font-body);
     background: var(--c-bg);
     color: var(--c-text);
-    height: 100vh;
+    height: 100vh;   /* fallback for browsers without dvh */
+    height: 100dvh;  /* dynamic viewport: excludes the mobile browser's
+                        toolbars, so the bottom controls stay tappable */
     display: flex;
     flex-direction: column;
     align-items: center;
     overflow: hidden;
     position: relative;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
   /* ── Background radial glow ── */
@@ -148,7 +152,9 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 20px 8px 16px;
+    /* safe-area: on notch phones the home bar overlays the bottom edge —
+       the controls must sit above it, not under it */
+    padding: 20px 8px calc(16px + env(safe-area-inset-bottom));
     gap: 0;
     z-index: 2;
     min-height: 0;
@@ -425,6 +431,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    /* Wrap instead of overflowing: on a phone the persona/mic/camera row
+       is wider than the screen and the clipped edge made the buttons
+       untappable. Wrapping keeps every control on-screen. */
+    flex-wrap: wrap;
+    gap: 8px 12px;
     flex-shrink: 0;
     z-index: 2;
   }
@@ -548,3 +559,30 @@
     50% { opacity: 0.4; transform: scale(0.8); }
   }
 
+
+  /* -- Mobile: keep the control bar inside the visible, thumb-reachable
+     area (portrait phones are narrower than the controls row and their
+     browser toolbars cover the bottom edge) -- */
+  @media (max-width: 600px) {
+    header { padding: 12px 8px 0; }
+    .logo h1 { font-size: 17px; }
+    .model-label { display: none; }      /* the header already shows it */
+    .portal-stack { padding-top: 12px; }
+    .controls { justify-content: center; padding-top: 10px; }
+    .ctrl-btn { padding: 10px 14px; }    /* comfortable touch target */
+    .on-device-pill { display: none; }   /* duplicate of the model label */
+    .waveform-wrap { margin-top: 10px; height: 40px; }
+    .transcript { margin-top: 10px; }
+    /* The catalog panel is anchored to the chip's left edge on desktop;
+       with the controls centered on a narrow screen that anchor can run
+       off the right edge, so pin it to the viewport center here. */
+    .persona-panel {
+      position: fixed;
+      left: 50%;
+      right: auto;
+      bottom: calc(64px + env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      width: min(320px, calc(100vw - 24px));
+      max-height: 55dvh;
+    }
+  }
