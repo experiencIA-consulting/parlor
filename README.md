@@ -78,7 +78,7 @@ cp .env.example .env      # then edit: OPENAI_API_KEY=sk-...
 uv run parlor
 ```
 
-Open [http://localhost:8000](http://localhost:8000), grant camera and microphone access, and start talking. The only download at startup is the ~3 MB smart-turn classifier.
+Open [http://localhost:8000](http://localhost:8000), grant microphone access, and start talking — the camera stays off (no tokens spent on frames) until you switch it on with the **Camera** toggle. The only download at startup is the ~3 MB smart-turn classifier.
 
 ## Configuration
 

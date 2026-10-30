@@ -7,7 +7,12 @@ const waveformCanvas = $('waveform');
 const waveformCtx = waveformCanvas.getContext('2d');
 
 let ws, mediaStream, myvad;
-let cameraEnabled = true;
+// The camera is OPT-IN (token economy, cloud era): every eyes-on turn pays
+// ~1k image tokens on the chat endpoint, and a stale prefetched frame
+// silently charges the next turn too. The user switches it on with the
+// toggle; until then no video track is even acquired, so the browser's
+// camera indicator stays off and no frames ride the session.
+let cameraEnabled = false;
 let audioCtx;
 let state = 'loading';
 let ignoreIncomingAudio = false;
@@ -464,22 +469,50 @@ const VIDEO_CONSTRAINTS = { width: 640, height: 480, facingMode: 'user' };
 const AUDIO_CONSTRAINTS = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 
 async function startCamera() {
+  // Mic only: video is acquired later, when the user opts in (enableCamera).
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: VIDEO_CONSTRAINTS, audio: AUDIO_CONSTRAINTS,
-    });
-    video.srcObject = mediaStream;
-    return;
-  } catch (e) { console.warn('Video+audio failed:', e.message); }
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS });
+  } catch (e) {
+    console.warn('Mic failed:', e.message);
+    mediaStream = new MediaStream();
+  }
+  if (!mediaStream.getAudioTracks().length) {
+    console.warn('no mic — voice turns and VAD will not work');
+  }
+}
 
-  const streams = await Promise.allSettled([
-    navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS }),
-    navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS }),
-  ]);
-  mediaStream = new MediaStream();
-  streams.forEach(r => { if (r.status === 'fulfilled') r.value.getTracks().forEach(t => mediaStream.addTrack(t)); });
-  if (mediaStream.getVideoTracks().length) video.srcObject = mediaStream;
-  if (!mediaStream.getAudioTracks().length) { cameraEnabled = false; }
+function setCameraUI() {
+  cameraToggle.classList.toggle('active', cameraEnabled);
+  cameraToggle.textContent = cameraEnabled ? 'Camera On' : 'Camera Off';
+  video.style.opacity = cameraEnabled ? 1 : 0.3;
+}
+
+// Acquire the video track on demand (must run inside the click's user
+// gesture — Chrome requires one for getUserMedia, and we want the light
+// to come on exactly when the toggle flips).
+async function enableCamera() {
+  if (cameraEnabled) return;
+  try {
+    let [track] = mediaStream.getVideoTracks();
+    if (!track) {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS });
+      [track] = stream.getVideoTracks();
+      mediaStream.addTrack(track);
+    }
+    video.srcObject = mediaStream;
+    cameraEnabled = true;
+    setCameraUI();
+  } catch (e) {
+    console.warn('Camera enable failed:', e.message);
+    cameraEnabled = false;
+    setCameraUI();
+  }
+}
+
+function disableCamera() {
+  cameraEnabled = false;
+  for (const t of mediaStream.getVideoTracks()) t.stop();
+  setCameraUI();
 }
 
 function captureFrame() {
@@ -757,10 +790,8 @@ $('modeStop').addEventListener('click', () => {
 });
 
 cameraToggle.addEventListener('click', () => {
-  cameraEnabled = !cameraEnabled;
-  cameraToggle.classList.toggle('active', cameraEnabled);
-  cameraToggle.textContent = cameraEnabled ? 'Camera On' : 'Camera Off';
-  video.style.opacity = cameraEnabled ? 1 : 0.3;
+  // The track is acquired/stopped here, inside a real user gesture.
+  cameraEnabled ? disableCamera() : enableCamera();
 });
 
 // ── Init ──
@@ -769,6 +800,7 @@ async function init() {
   window.addEventListener('resize', initWaveformCanvas);
 
   await startCamera();
+  setCameraUI();  // camera starts OFF — dim the empty <video> to match
   connect();
 
   myvad = await vad.MicVAD.new({
