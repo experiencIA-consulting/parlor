@@ -33,3 +33,7 @@ default.profraw
 
 # pytest basetemp (el TMP de este host aterriza dentro del workspace)
 pytest-of-*/
+
+# Servidor lanzado en background (logs de ejecución)
+server.log
+server.err.log

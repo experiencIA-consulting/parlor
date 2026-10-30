@@ -113,6 +113,15 @@ without):
 uv run pytest
 ```
 
+On Windows, `dev.cmd` wraps the server lifecycle (start/stop/restart/status/logs, detached with logs, LAN binding by default) so you don't have to remember the PowerShell one-liners:
+
+```powershell
+.\dev.cmd            # restart (default)
+.\dev.cmd start      # detached: survives the terminal, logs to server.log
+.\dev.cmd status     # port + HTTP probe
+.\dev.cmd logs       # tail the log
+```
+
 Set `PARLOR_TEST_URL=ws://localhost:8000/ws` to run it against an
 already-running server. Browser-only behavior (echo at speaker volume, VAD
 feel, multilingual speech) still needs a live mic and ears.
