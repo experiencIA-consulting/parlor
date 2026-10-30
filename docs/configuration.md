@@ -36,7 +36,8 @@ in the final chunk, and structured outputs for the action decider
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
-| `PORT`   | `8000`  | Web server port (serves on `localhost` only — browsers require a secure context for mic/camera) |
+| `PORT`   | `8000`  | Web server port |
+| `PARLOR_HOST` | `localhost` | Bind address. `0.0.0.0` exposes to the LAN for mobile testing — but mobile browsers need a **secure context** for mic/camera: mark `http://<IP>:8000` as secure on the device (Chrome flag `unsafely-treat-insecure-origin-as-secure`) or front it with valid HTTPS (e.g. Tailscale) |
 | `TEMPERATURE` | `0.7` | Sampling temperature for speech (0 = deterministic; the action decider always runs at 0) |
 | `HISTORY_ROTATE_TOKENS` | `24000` | Estimated context size that triggers dropping the oldest quarter of the history — a cost dial, not the model's real ceiling |
 | `TIME_NOTE_MIN_S` | `120` | Seconds of quiet before the next turn tells the model how long the silence was |
@@ -44,9 +45,10 @@ in the final chunk, and structured outputs for the action decider
 ## Background research
 
 Delegation reuses the main `OPENAI_API_KEY` when `REASONER_*` is unset: on
-api.openai.com that runs `gpt-4o-search-preview` (native web search), so
-research works with a single key. A dedicated OpenRouter endpoint gives
-you any frontier model plus the `:online` web-search mechanism.
+api.openai.com that runs `gpt-5-search-api` (native web search — the
+`gpt-4o-*-search-preview` family was deprecated mid-2026), so research
+works with a single key. A dedicated OpenRouter endpoint gives you any
+frontier model plus the `:online` web-search mechanism.
 
 | Variable              | Default                                     | Description |
 | --------------------- | ------------------------------------------- | ----------- |

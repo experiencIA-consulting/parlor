@@ -986,10 +986,19 @@ async def websocket_endpoint(ws: WebSocket):
 
 def main() -> None:
     port = int(os.environ.get("PORT", "8000"))
-    # localhost, not 0.0.0.0: browsers treat http://localhost as a secure
-    # context but not http://0.0.0.0, and without one getUserMedia (mic,
-    # camera) doesn't exist.
-    uvicorn.run(app, host="localhost", port=port)
+    # Bind configurable (PARLOR_HOST). Default localhost ON PURPOSE: browsers
+    # treat http://localhost as a secure context but not http://<LAN-IP>, and
+    # without one getUserMedia (mic, camera) doesn't exist. A 0.0.0.0 bind is
+    # for LAN/mobile testing — the thorough browser then needs the device to
+    # mark the origin secure (chrome://flags) or a valid HTTPS front.
+    host = os.environ.get("PARLOR_HOST", "localhost").strip() or "localhost"
+    if host not in ("localhost", "127.0.0.1"):
+        print(f"Binding to {host!r}: on non-local hosts the browser needs a "
+              "SECURE CONTEXT for mic/camera — http://<ip> won't ask for them. "
+              "Mark the origin as secure on the device (chrome://flags "
+              "'unsafely-treat-insecure-origin-as-secure') or front it with "
+              "valid HTTPS (e.g. Tailscale).")
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

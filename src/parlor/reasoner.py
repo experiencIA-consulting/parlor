@@ -4,7 +4,8 @@ speakable answer.
 
 REASONER_* config wins when set. Without it, delegation falls back to the
 same OpenAI credentials the chat stack uses — on api.openai.com that
-means a native web-search model (gpt-4o-search-preview), so research
+means a native web-search model (gpt-5-search-api; the whole
+gpt-4o-*-search-preview family was deprecated mid-2026), so research
 works with only one key. With a dedicated OpenRouter key, the default
 endpoint is OpenRouter, where REASONER_WEB_SEARCH=1 (the default)
 appends the ':online' suffix so any model gets provider-side web search.
@@ -12,6 +13,7 @@ appends the ':online' suffix so any model gets provider-side web search.
 
 import json
 import os
+import re
 import urllib.request
 
 import parlor.cloud as cloud
@@ -23,27 +25,22 @@ WEB_SEARCH = os.environ.get("REASONER_WEB_SEARCH", "1") == "1"
 
 if not (BASE_URL and API_KEY and MODEL):
     # Fall back to the chat stack's credentials: research rides the same
-    # key. OpenAI offers web search natively through the -search-preview
-    # models, so delegation keeps working with no second provider. (No
-    # key at all → enabled() is False and Parlor never delegates.)
+    # key. OpenAI offers web search natively through the search models, so
+    # delegation keeps working with no second provider. (No key at all →
+    # enabled() is False and Parlor never delegates.)
     BASE_URL = BASE_URL or cloud.BASE_URL
     API_KEY = API_KEY or cloud.API_KEY
-    MODEL = MODEL or ("gpt-4o-search-preview"
+    MODEL = MODEL or ("gpt-5-search-api"
                       if "api.openai.com" in BASE_URL else "openai/gpt-5.6-luna")
 
 if WEB_SEARCH and "openrouter.ai" in BASE_URL and not MODEL.endswith(":online"):
     MODEL += ":online"
+
 try:
     TIMEOUT_S = float(os.environ.get("REASONER_TIMEOUT", "90"))
 except ValueError:
     print("REASONER_TIMEOUT is not a number — using 90s")
     TIMEOUT_S = 90.0
-
-# On OpenRouter web search is requested through the model id itself, so it
-# has to be baked in here; other endpoints would reject the suffix.
-if (os.environ.get("REASONER_WEB_SEARCH", "1") == "1"
-        and "openrouter.ai" in BASE_URL and not MODEL.endswith(":online")):
-    MODEL += ":online"
 
 # The answer is relayed aloud by the voice model near-verbatim, so it must
 # already be speech-shaped when it comes back.
@@ -87,6 +84,19 @@ def ask(task: str) -> str:
     with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
         body = json.load(resp)
     answer = (body["choices"][0]["message"]["content"] or "").strip()
+    # Search models lean on markdown/source citations even when asked not
+    # to — both read terribly aloud. Strip them: markdown links unwrap to
+    # their text FIRST (else the naked-URL pass eats the ')' that closes
+    # them), URLs drop wholesale, bold/heading markers unwrap.
+    answer = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", answer)
+    answer = re.sub(r"https?://\S+", "", answer)
+    # A bare source domain rides in parentheses ("(kitco.com)") — noise
+    # when spoken. Dropped here, after the markdown/URL passes that
+    # normally grow it.
+    answer = re.sub(r"\s*\(([a-zA-Z0-9.\-]+\.(?:com|net|org|io|ai|es|mx|co|us|uk))\)", "", answer)
+    answer = answer.replace("**", "").replace("*", "")
+    answer = re.sub(r"^#+\s*", " ", answer, flags=re.MULTILINE)
+    answer = " ".join(answer.split())
     if not answer:
         raise RuntimeError("reasoner returned an empty answer")
     return answer

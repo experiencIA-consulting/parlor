@@ -39,7 +39,7 @@ Diagrama objetivo (ver README): browser mic/cam → FastAPI → smart-turn (loca
 - **`src/parlor/pipeline.py`** — `merge_wavs()` (concat + cola 0.3 s de silencio), `speak_only()` (respeta orden de frames turn_final→audio_end), `estimate_tokens` solo texto/imagen, swap del parser stream de transcript → respuesta directa + corte `##`. **`run_turn(..., instruction: str | None)`** nuevo parámetro para el guard de instruction-echo (ver §4.4).
 - **`src/parlor/tts.py`** — `CloudBackend` (OpenAI TTS) con mapeo de voces: `af_*` → default/`alloy`, `am_*` → `echo`, voces válidas pasan; `TTS_BACKEND=kokoro` conserva MLX/ONNX de la era on-device.
 - **`src/parlor/actions.py`** — decisor sobre `cloud.chat_blocking` + schema estricto; cláusulas por modo intactas; fallo ⇒ `NONE` (turno no-op).
-- **`src/parlor/reasoner.py`** — razonador cloud con degradación a la clave principal `OPENAI_API_KEY` + modelo `gpt-4o-search-preview` cuando no hay `REASONER_*`.
+- **`src/parlor/reasoner.py`** — razonador cloud con degradación a la clave principal `OPENAI_API_KEY` + modelo `gpt-5-search-api` cuando no hay `REASONER_*` (la familia `gpt-4o-*-search-preview` era deprecada en 2026 → las búsquedas web fallaban con 404; fijado y verificado en vivo).
 
 ### Ajustados
 - **`benchmarks/fixtures.py`** — retune tras el swap de voces (§4.5): `long_question` ahora se sintetiza con voz **shimmer** (clasifica complete p=0.65), nuevo variant **`long_question_held`** en **alloy** (clasifica HOLD p=0.07); se retiró `long_question_male` (el mapping `am_*`→echo ahora lee completo). Comentarios actualizados con el método.
@@ -97,3 +97,5 @@ Tres iteraciones de economía de tokens / privacidad / expresividad sobre el mis
    - `tests/test_personas.py`: unicidad de keys, voces válidas, campos presentes, y el body capturado de `generate` lleva voice/instructions intactos (5 tests, sin red).
 
    Coste de personas: la cláusula de persona ~30-60 tokens/request en el system prompt; las `instructions` van en el input del TTS (centavos/min); cada preview ▶ es un TTS deliberado.
+
+4. **`PARLOR_HOST` — bind configurable de pruebas móviles** (`server.py:main`, `tests/test_bind.py`): el default SIGUE siendo `localhost` a propósito (contexto seguro del navegador). `PARLOR_HOST=0.0.0.0` expone LAN pero NO da micrófono/cámara al móvil: necesita que el dispositivo marque el origen seguro (flag `unsafely-treat-insecure-origin-as-secure` de Chrome) o HTTPS válido delante (Tailscale). El print de advertencia de main() lo recuerda en el arranque. Regla de firewall la maneja el mantenedor (no va en código).
