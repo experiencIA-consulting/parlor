@@ -17,6 +17,9 @@ wheels/
 benchmarks/fixtures/
 benchmarks/results/
 
+# Local model caches (smart-turn):
+.hf-cache/
+
 # macOS
 .DS_Store
 default.profraw
@@ -25,3 +28,4 @@ default.profraw
 .idea/
 .vscode/
 .env
+/.vs
