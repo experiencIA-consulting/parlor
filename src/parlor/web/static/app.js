@@ -1,5 +1,6 @@
 const $ = id => document.getElementById(id);
 const video = $('video'), cameraToggle = $('cameraToggle');
+const micToggle = $('micToggle');
 const messagesDiv = $('messages'), statusEl = $('status');
 const stateDot = $('stateDot'), stateText = $('stateText');
 const viewportWrap = $('viewportWrap');
@@ -551,6 +552,8 @@ const BARGE_SPEECH_P = 0.85;
 let bargeWindow = []; // 1/0 per recent frame, while TTS plays
 
 function handleVadFrame(probs, frame) {
+  if (micMuted) return;  // the muted track feeds silence anyway — nothing
+                         // must ever reach a send path while muted
   if (state === 'speaking') {
     bargeWindow.push(probs && probs.isSpeech > BARGE_SPEECH_P ? 1 : 0);
     if (bargeWindow.length > BARGE_WINDOW) bargeWindow.shift();
@@ -633,6 +636,8 @@ function prefetchFrame() {
 
 function handleSpeechStart() {
   clearFlushTimer();
+  if (micMuted) return;  // should be unreachable (track feeds silence) —
+                         // a VAD edge must never capture pre-mute audio
   if (state === 'listening') { prefetchFrame(); startUtteranceCapture(); }
   // Barge-in while speaking is handled frame-by-frame in handleVadFrame,
   // which requires sustained speech — a single VAD trigger is too often echo.
@@ -655,6 +660,12 @@ function triggerBargeIn() {
 function handleSpeechEnd(audio) {
   const wasStreaming = speechActive && uttSamplesSent > 0;
   speechActive = false; // always reset — a leak here streams mic audio forever
+  if (micMuted) {
+    // A segment leaked in despite the mute (VAD edge / race): never send it.
+    uttFrames = []; uttSamplesSent = 0; framePrefetched = false;
+    if (state === 'listening') goListening();
+    return;
+  }
   if (state !== 'listening' || !wsOpen()) {
     // Utterance dropped (e.g. it ended while the assistant was speaking):
     // its prefetched frame is stale now — the next utterance sends a fresh one.
@@ -688,6 +699,56 @@ function handleSpeechEnd(audio) {
   if (imageBase64) payload.image = imageBase64;
   wsSend(payload);
 }
+
+// ── Mic mute (privacy) ──
+// The audio track is disabled in place (enabled=false): every frame it now
+// produces is silence, so the VAD never opens a speech segment and nothing
+// leaves the client — no request or re-permission is needed to unmute, and
+// the analyser/waveform go flat by themselves. In-flight state is discarded
+// locally, BUT audio already sent (streamed chunks of the running
+// utterance, the turn's tail, segments the server holds mid-hold) is
+// already in the server session — muting proves against FUTURE speech, not
+// frames already across the wire.
+let micMuted = false;
+
+function setMicUI() {
+  micToggle.classList.toggle('active', !micMuted);
+  micToggle.textContent = micMuted ? 'Mic Muted' : 'Mic On';
+  if (micMuted && state === 'listening') setStatus('disconnected', 'Mic muted');
+}
+
+function muteMic() {
+  if (micMuted) return;
+  micMuted = true;
+  for (const t of mediaStream.getAudioTracks()) t.enabled = false;
+  // Drop anything half-captured: an utterance that started before the
+  // mute must NOT continue streaming its (pre-mute) frames after un-mute.
+  speechActive = false;
+  uttFrames = [];
+  uttSamplesSent = 0;
+  preFrames = [];
+  phantomQuiet = 0;
+  bargeWindow = [];
+  framePrefetched = false;
+  clearFlushTimer();
+  setMicUI();
+}
+
+function unmuteMic() {
+  if (!micMuted) return;
+  micMuted = false;
+  for (const t of mediaStream.getAudioTracks()) t.enabled = true;
+  setMicUI();
+  // A segment may already have opened while our track was feeding the VAD
+  // silence frames — canonicalize the state machine to a clean idle
+  // (goListening clears pending flags and announces the floor is free, but
+  // do NOT put a 'ready' over a client that may be mid-thought instead).
+  if (state === 'listening' && !speechActive) goListening();
+}
+
+micToggle.addEventListener('click', () => {
+  micMuted ? unmuteMic() : muteMic();
+});
 
 // ── Float32 @ 16kHz → WAV base64 ──
 function float32ToWavBase64(samples) {
