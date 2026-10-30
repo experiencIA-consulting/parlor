@@ -189,6 +189,11 @@ function connect() {
   ws.onopen = () => {
     setStatus('connected', 'Connected');
     if (state !== 'loading') setState('listening');
+    // A fresh WS session starts neutral on the server: re-apply the
+    // remembered persona so reload keeps the same voice/character.
+    if (personaKey && personaKey !== 'neutral') {
+      wsSend({ type: 'set_personality', key: personaKey });
+    }
   };
   ws.onclose = () => {
     // A reconnect gets a brand-new server conversation — reset per-turn state.
@@ -262,6 +267,22 @@ function connect() {
       if (meta) meta.textContent += ` · tts ${msg.tts_time}s`;
     } else if (msg.type === 'mode_changed') {
       setSessionMode(msg.mode);
+    } else if (msg.type === 'personality_changed') {
+      personaKey = msg.key;
+      localStorage.setItem(PERSONA_STORE_KEY, personaKey);
+      setPersonaChip(msg.label, msg.key !== 'neutral');
+      renderPersonaPanel();
+    } else if (msg.type === 'voice_preview_start') {
+      // Reuses the streamed-playback machine (setState('speaking') raises
+      // the VAD threshold; onended → goListening restores everything).
+      streamSampleRate = msg.sample_rate || 24000;
+      startStreamPlayback();
+    } else if (msg.type === 'voice_preview_chunk') {
+      queueAudioChunk(msg.audio);
+    } else if (msg.type === 'voice_preview_end') {
+      // Playback already drained → restore now; otherwise the last
+      // source's onended does it via goListening().
+      if (!streamSources.length) goListening();
     } else if (msg.type === 'delegation_started') {
       addDelegationChip(msg.id, msg.task);
     } else if (msg.type === 'delegation_parked') {
@@ -324,10 +345,83 @@ function setAssistantMeta(text) {
 // ── Session mode (server-driven; the chip's stop button is the escape
 // hatch for when the spoken exit command gets misheard) ──
 const MODE_LABELS = { translate: 'Translating → English', listen: 'Just listening' };
-
 function setSessionMode(mode) {
   $('modeChip').hidden = mode === 'conversation';
   $('modeLabel').textContent = MODE_LABELS[mode] || mode;
+}
+
+// ── Personality selector: curated presets from the server (/personas).
+// A preset bundles voice + speech delivery + chat persona; switching sends
+// set_personality and the server rewrites its system message for FUTURE
+// turns. The choice persists in localStorage and re-applies on connect.
+const PERSONA_STORE_KEY = 'parlor-persona';
+let personaCatalog = [];   // [{key,label,description}] from /personas
+let personaKey = localStorage.getItem(PERSONA_STORE_KEY) || 'neutral';
+
+const personaChip = $('personaChip'), personaPanel = $('personaPanel');
+
+function renderPersonaPanel() {
+  personaPanel.innerHTML = '';
+  for (const p of personaCatalog) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'persona-item' + (p.key === personaKey ? ' selected' : '');
+    item.innerHTML = `<span class="p-label"></span><button class="p-preview" title="Sample">▶</button><span class="p-desc"></span>`;
+    item.querySelector('.p-label').textContent = p.label;
+    item.querySelector('.p-desc').textContent = p.description;
+    item.addEventListener('click', (e) => {
+      if (e.target.classList.contains('p-preview')) return;
+      selectPersona(p.key);
+    });
+    item.querySelector('.p-preview').addEventListener('click', () => {
+      if (state === 'listening' || state === 'processing') wsSend({ type: 'voice_preview', key: p.key });
+    });
+    personaPanel.appendChild(item);
+  }
+}
+
+function setPersonaChip(label, selected = true) {
+  personaChip.textContent = label;
+  personaChip.classList.toggle('active', selected);
+}
+
+function selectPersona(key) {
+  personaKey = key;
+  localStorage.setItem(PERSONA_STORE_KEY, key);
+  wsSend({ type: 'set_personality', key });
+  personaPanel.hidden = true;
+}
+
+personaChip.addEventListener('click', () => {
+  personaPanel.hidden = !personaPanel.hidden;
+  if (!personaPanel.hidden) renderPersonaPanel();
+});
+document.addEventListener('click', (e) => {
+  // click-outside close (the chip's own handler re-toggles it)
+  if (!personaPanel.hidden && !personaChip.contains(e.target)
+      && !personaPanel.contains(e.target) && !e.target.closest('.persona-item')) {
+    personaPanel.hidden = true;
+  }
+});
+
+// Preview playback: reuses the audio pipeline's chunk decoder, but the
+// frames are voice_preview_* — they must never touch the transcript or
+// the turn machine. While the sample plays, the VAD threshold rises (the
+// mic would otherwise hear the sample) and any incoming turn frames are
+// ignored (a delivery LEADING the sample would still play — the preview
+// is only issued from idle anyway).
+async function loadPersonas() {
+  try {
+    personaCatalog = await (await fetch('/personas')).json();
+  } catch (e) {
+    console.warn('personas catalog failed to load:', e.message);
+    personaCatalog = [{ key: 'neutral', label: 'Neutral', description: 'default assistant' }];
+  }
+  const known = personaCatalog.some(p => p.key === personaKey);
+  if (!known) personaKey = 'neutral';
+  setPersonaChip(personaCatalog.find(p => p.key === personaKey)?.label || 'Neutral',
+                 personaKey !== 'neutral');
+  renderPersonaPanel();
 }
 
 // ── Delegation chips: a background research task in flight, shown until
@@ -860,6 +954,7 @@ async function init() {
   initWaveformCanvas();
   window.addEventListener('resize', initWaveformCanvas);
 
+  loadPersonas();  // the catalog fills the selector independently of the WS
   await startCamera();
   setCameraUI();  // camera starts OFF — dim the empty <video> to match
   connect();

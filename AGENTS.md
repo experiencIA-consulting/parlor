@@ -73,10 +73,27 @@ Diagrama objetivo (ver README): browser mic/cam → FastAPI → smart-turn (loca
 
 8. **La suite consume clave real.** Solo el RAZONADOR está mockeado (`tests/conftest.py`, trigger "stock"→500, "naples"→stall 8 s). Chat/STT/TTS/STT speech usan la clave de `.env`: cada vuelta completa de la suite cuesta fracciones de dólar y tarda ~9 min. Sin `OPENAI_API_KEY` los tests e2e se saltan (unit tests corren siempre). `PARLOR_TEST_URL` apunta la suite a un server externo.
 
-9. **Pendiente de limpieza:** el commit `9578675` incluyó por accidente logs de pytest (`pytest-of-JuLiOBM/**`) — borra ese directorio del repo y añade `pytest-of-*/` a `.gitignore` (TMP de este host aterrizó dentro del workspace).
+9. **Limpieza hecha (commit `410f645`):** los logs de pytest que se subieron por accidente en `9578675` fueron retirados y `pytest-of-*/` está en `.gitignore`.
 
 ## 5. Estado al cierre
 
-- Suite: la corrida e2e completa dio 75 passed / 3 failed; los 3 se arreglaron después (2 de translation por §4.3/§4.4 + 1 skip por llama de §4.5). Los 3 revisados PASARON en verificación focalizada (`test_translation.py`, `test_stream_parser.py`, `test_z_failure.py`: 22 passed, 1 skipped). La re-corrida completa se canceló por reinicio del server — relanzar `uv run pytest -q` para confirmar.
+- Suite COMPLETA confirmada en verde: **77 passed, 9 skipped, 0 failed** (542 s). Los skips son: sin clave e2e + tests legacy llama.cpp (backend no usado, `test_llama_startup.py`, `test_z_failure.py`).
 - Round-trips validados con la clave del mantenedor: chat streaming, TTS (OpenAI), y STT español ("Hola, esto es una prueba.").
 - Costes con defaults (gpt-4o-mini + APIs OpenAI speech): del orden de **1–2 US cents/min de conversación**, dominado por STT/TTS; modelos de chat mayores escalan ese costo.
+
+## 6. Optimizaciones post-migración (cámara opt-in, mute de mic, personalidades)
+
+Tres iteraciones de economía de tokens / privacidad / expresividad sobre el mismo cliente:
+
+1. **Cámara opt-in** (`app.js`, `index.html`): solo se pide micrófono al cargar; el track de video se adquiere/detiene en el toggle (dentro del gesto del click, requisito de Chrome). `cameraEnabled=false` ⇒ `captureFrame()`/`prefetchFrame()` devuelven null ⇒ cero tokens de imagen por turno. `enableCamera()` revierte a Off si falla el permiso.
+2. **Mute de micrófono (privacidad)**: `micToggle` desactiva el track de audio EN SITIO (`track.enabled=false`): el VAD solo recibe silencio ⇒ ningún frame sale del cliente. Al silenciar se descarta la utterance a medio capturar (`speechActive`, `uttFrames`, `preFrames`, flush timer). Los handlers `handleVadFrame/handleSpeechStart/handleSpeechEnd` están blindados con guardas de `micMuted` (una raza del VAD nunca envía audio pre-mute). Límite honesto documentado: lo YA enviado (chunks en vuelo, tail, hold del server) sigue en la sesión — el mute protege lo FUTURO.
+3. **Selector de personalidades en vivo** (carta al agente futuro: el catálogo es curado SERVER-SIDE, no texto libre):
+   - `src/parlor/personas.py` — `Persona(key, label, description, voice, tts_instructions, system, sample_line)`; 7 presets (Neutral, La Narradora/shimmer, Amigo Casero/sage, El Profesor/onyx, Robot/echo, Presentador/nova, El Coach/coral). `get()` degrada a neutral ante claves desconocidas (stale localStorage).
+   - **Los tres ejes**: `voice` = timbre (catálogo fijo de OpenAI, no hay clonación); `tts_instructions` = el campo `instructions` de gpt-4o-mini-tts (tono/ritmo/emoción — AQUÍ vive la voz "robotizada", nunca en el modelo de chat); `system` = cláusula de persona añadida al system prompt de la sesión.
+   - `tts.py`: `generate(..., instructions="")` añade el campo al body si lo hay; los backends locales (MLX/ONNX) lo aceptan y lo ignoran.
+   - `pipeline.py`: `run_turn(..., tts_instructions)` y `speak_only(..., tts_instructions)` lo pasan a cada generate.
+   - `server.py`: GET `/personas` (catálogo para el UI); WS `set_personality` (revalida, reescribe `history[0]` in-place con la cláusula nueva, emite `personality_changed`) y WS `voice_preview` (sintetiza `sample_line` FUERA del bucle de turnos, frames `voice_preview_start/chunk/end` ≠ turn frames). **Resolución de voz en TODOS los puntos TTS**: `persona.voice or mode.tts_voice` (la persona gana al override del modo cuando la define).
+   - Cliente: chip "Personalidad" + panel flotante con ▶ preview por preset (una llamada TTS corta, reproducida por la máquina de playback existente — sus `onended` restauran estado); persistencia `localStorage 'parlor-persona'` re-aplicada en cada `ws.onopen` (una sesión WS nueva nace neutral en el server).
+   - `tests/test_personas.py`: unicidad de keys, voces válidas, campos presentes, y el body capturado de `generate` lleva voice/instructions intactos (5 tests, sin red).
+
+   Coste de personas: la cláusula de persona ~30-60 tokens/request en el system prompt; las `instructions` van en el input del TTS (centavos/min); cada preview ▶ es un TTS deliberado.

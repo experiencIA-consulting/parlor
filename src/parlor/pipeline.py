@@ -127,7 +127,8 @@ async def release_client(ws) -> None:
                          "timings": {}, "spoke": False})
 
 
-async def speak_only(ws, line: str, tts_backend, tts_voice: str = "") -> bool:
+async def speak_only(ws, line: str, tts_backend, tts_voice: str = "",
+                     tts_instructions: str = "") -> bool:
     """Speak one canned line without an LLM turn — the fallback for an
     utterance the transcriber heard no words in. Frames mimic run_turn's
     outro exactly (turn_final BEFORE audio_end), then report whether
@@ -136,7 +137,8 @@ async def speak_only(ws, line: str, tts_backend, tts_voice: str = "") -> bool:
     loop = asyncio.get_event_loop()
     try:
         pcm = await loop.run_in_executor(
-            None, lambda: tts_backend.generate(line, voice=tts_voice))
+            None, lambda: tts_backend.generate(line, voice=tts_voice,
+                                               instructions=tts_instructions))
     except Exception as e:
         print(f"Fallback TTS failed: {e}")
         await release_client(ws)
@@ -303,7 +305,8 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
                    tts_voice: str = "",
                    proactive: bool = False,
                    fallback: str | None = None,
-                   instruction: str | None = None
+                   instruction: str | None = None,
+                   tts_instructions: str = ""
                    ) -> tuple[str, int | None, bool, bool]:
     """Stream one model turn: decode → sentences → TTS, all pipelined.
     Returns the raw generated text, the request's real prompt token count
@@ -353,7 +356,8 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
             if interrupted.is_set():
                 continue  # keep draining
             pcm = await loop.run_in_executor(
-                None, lambda s=sentence: tts_backend.generate(s, voice=tts_voice))
+                None, lambda s=sentence: tts_backend.generate(
+                    s, voice=tts_voice, instructions=tts_instructions))
             if interrupted.is_set():
                 continue
             if not audio_state["started"]:

@@ -20,7 +20,8 @@ class TTSBackend:
 
     sample_rate: int = 24000
 
-    def generate(self, text: str, voice: str = "", speed: float = 1.0) -> np.ndarray:
+    def generate(self, text: str, voice: str = "", speed: float = 1.0,
+                 instructions: str = "") -> np.ndarray:
         raise NotImplementedError
 
 
@@ -49,13 +50,21 @@ class CloudBackend(TTSBackend):
             return self.default_voice if self.default_voice in self._OPENAI_VOICES else "alloy"
         return self.default_voice
 
-    def generate(self, text: str, voice: str = "", speed: float = 1.0) -> np.ndarray:
+    def generate(self, text: str, voice: str = "", speed: float = 1.0,
+                 instructions: str = "") -> np.ndarray:
+        """instructions is gpt-4o-mini-tts's style prompt (tone, emotion,
+        pace, accent — conversational directives, not a persona note) —
+        e.g. a persona's robotic/flat delivery rides HERE, never on the
+        conversation model. Ignored by tts models without the field if
+        some other OPENAI_TTS_MODEL is set."""
         body = {
             "model": cloud.TTS_MODEL,
             "voice": self._map_voice(voice),
             "input": text,
             "response_format": "pcm",  # raw 16-bit LE mono @24kHz
         }
+        if instructions:
+            body["instructions"] = instructions
         req = urllib.request.Request(
             cloud.BASE_URL + "/audio/speech", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json",
@@ -81,7 +90,8 @@ class MLXBackend(TTSBackend):
         # Warmup: triggers pipeline init (phonemizer, spacy, etc.)
         list(self._model.generate(text="Hello", voice="af_heart", speed=1.0))
 
-    def generate(self, text: str, voice: str = "af_heart", speed: float = 1.1) -> np.ndarray:
+    def generate(self, text: str, voice: str = "af_heart", speed: float = 1.1,
+                 instructions: str = "") -> np.ndarray:  # noqa: ARG002 — no on-device style field
         results = list(self._model.generate(text=text, voice=voice, speed=speed))
         return np.concatenate([np.array(r.audio) for r in results])
 
@@ -99,7 +109,8 @@ class ONNXBackend(TTSBackend):
         self._model = kokoro_onnx.Kokoro(model_path, voices_path)
         self.sample_rate = 24000
 
-    def generate(self, text: str, voice: str = "af_heart", speed: float = 1.1) -> np.ndarray:
+    def generate(self, text: str, voice: str = "af_heart", speed: float = 1.1,
+                 instructions: str = "") -> np.ndarray:  # noqa: ARG002 — no on-device style field
         pcm, _sr = self._model.create(text, voice=voice, speed=speed)
         return pcm
 

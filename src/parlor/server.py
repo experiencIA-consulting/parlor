@@ -10,6 +10,7 @@ the model's own tokens. No local model downloads, no GPU needed.
 """
 
 import asyncio
+import base64
 import itertools
 import json
 import os
@@ -35,7 +36,7 @@ for _s in (sys.stdout, sys.stderr):
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 try:  # raised by ws.send_text after the client goes away (uvicorn-specific)
@@ -49,7 +50,7 @@ DISCONNECT_ERRORS = (WebSocketDisconnect, ClientDisconnected)
 from dotenv import load_dotenv
 load_dotenv()  # before importing cloud — it reads its config at import time
 
-from parlor import actions, cloud, reasoner, tts
+from parlor import actions, cloud, personas, reasoner, tts
 from parlor.modes import MODES
 from parlor.pipeline import (estimate_tokens, image_part, merge_wavs,
                              release_client, run_turn, send_json,
@@ -338,6 +339,17 @@ async def root():
     return HTMLResponse(content=html.replace("{{model}}", cloud.model_label()))
 
 
+@app.get("/personas")
+async def personas_catalog():
+    """The curated personality catalog: key/label/description per preset.
+    Voice ids, style instructions and persona prompts live server-side —
+    the client never ships a prompt."""
+    return JSONResponse([
+        {"key": p.key, "label": p.label, "description": p.description}
+        for p in personas.PRESETS
+    ])
+
+
 def turn_instruction(msg: dict, has_image: bool, has_transcript: bool) -> str:
     if has_transcript:
         camera = CAMERA_CLAUSE if has_image else ""
@@ -354,9 +366,16 @@ async def websocket_endpoint(ws: WebSocket):
 
     delegation = reasoner.enabled()
     clock = time.strftime("%A at %I:%M %p").replace(" 0", " ")
-    system = (SYSTEM_PROMPT + SESSION_CLOCK.format(clock=clock)
-              + CAPABILITY_NOTE + (RESEARCH_NOTE if delegation else ""))
-    history: list = [{"role": "system", "content": system}]
+    persona = personas.get("neutral")
+
+    def system_prompt(p: personas.Persona) -> str:
+        text = (SYSTEM_PROMPT + SESSION_CLOCK.format(clock=clock)
+                + CAPABILITY_NOTE + (RESEARCH_NOTE if delegation else ""))
+        if p.system:
+            text += " " + p.system
+        return text
+
+    history: list = [{"role": "system", "content": system_prompt(persona)}]
     mode = MODES["conversation"]
 
     interrupted = asyncio.Event()
@@ -522,7 +541,8 @@ async def websocket_endpoint(ws: WebSocket):
         user_msg = {"role": "user", "content": [text_part(prompt)]}
         raw_text, pt, _, spoke = await run_turn(
             ws, history + [user_msg], interrupted, active, tts_backend,
-            expect_transcript=False, tts_voice=mode.tts_voice,
+            expect_transcript=False, tts_voice=persona.voice or mode.tts_voice,
+            tts_instructions=persona.tts_instructions,
             proactive=True, fallback=fallback, instruction=prompt)
         if pt:
             prompt_tokens["last"] = pt
@@ -646,6 +666,49 @@ async def websocket_endpoint(ws: WebSocket):
                 # that must work even when the model mistranslates the
                 # spoken exit command.
                 await switch_mode(str(msg.get("mode", "")))
+                continue
+
+            if msg.get("type") == "set_personality":
+                # Palette switch: voice + delivery + chat persona ride the
+                # NEXT request wholesale — nothing in the pipeline cares
+                # which model "was" speaking, so the switch is instant and
+                # keeps the conversation (the system message is rewritten
+                # in place: the old persona clause leaves future turns).
+                p = personas.get(str(msg.get("key", "")))
+                if p.key != persona.key:
+                    persona = p
+                    history[0] = {"role": "system",
+                                  "content": system_prompt(persona)}
+                    print(f"Persona → {persona.label} ({persona.voice or 'default voice'})")
+                await send_json(ws, {"type": "personality_changed",
+                                     "key": persona.key,
+                                     "label": persona.label})
+                continue
+
+            if msg.get("type") == "voice_preview":
+                # One short sample line, synthesized OUTSIDE any turn (no
+                # history entry, no turn frames — distinct preview_* frames
+                # keep the client's transcript/playback state untouched).
+                p = personas.get(str(msg.get("key", "")))
+                try:
+                    pcm = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: tts_backend.generate(
+                            p.sample_line,
+                            voice=p.voice or mode.tts_voice,
+                            instructions=p.tts_instructions))
+                    pcm_int16 = (pcm * 32767).clip(-32768, 32767).astype(np.int16)
+                    await send_json(ws, {"type": "voice_preview_start",
+                                         "sample_rate": tts_backend.sample_rate})
+                    await send_json(ws, {"type": "voice_preview_chunk",
+                                         "audio": base64.b64encode(
+                                             pcm_int16.tobytes()).decode()})
+                    await send_json(ws, {"type": "voice_preview_end"})
+                except DISCONNECT_ERRORS:
+                    raise
+                except Exception:
+                    traceback.print_exc()  # preview failure keeps the session
+                    await send_json(ws, {"type": "voice_preview_end",
+                                         "failed": True})
                 continue
 
             if msg.get("type") == "delegation_done":
@@ -829,7 +892,8 @@ async def websocket_endpoint(ws: WebSocket):
                     if mode.speaks_fallback and not interrupted.is_set():
                         line = FLUSH_FALLBACK if is_flush else AUDIO_FALLBACK
                         spoke = await speak_only(ws, line, tts_backend,
-                                                 tts_voice=mode.tts_voice)
+                                                 tts_voice=persona.voice or mode.tts_voice,
+                                                 tts_instructions=persona.tts_instructions)
                         if spoke:
                             playing_since["t"] = time.time()
                     else:
@@ -881,7 +945,8 @@ async def websocket_endpoint(ws: WebSocket):
                     ws, history + [user_msg], interrupted, active,
                     tts_backend, expect_transcript=False,
                     p_complete=p_complete,
-                    tts_voice=mode.tts_voice,
+                    tts_voice=persona.voice or mode.tts_voice,
+                    tts_instructions=persona.tts_instructions,
                     fallback=fallback, instruction=instruction)
                 if pt:
                     prompt_tokens["last"] = pt
