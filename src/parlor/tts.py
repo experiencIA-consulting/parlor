@@ -1,14 +1,18 @@
-"""Platform-aware Kokoro TTS: mlx-audio on Apple Silicon, kokoro-onnx elsewhere."""
+"""TTS backends: OpenAI cloud TTS by default (no local model), with the
+original local Kokoro backends (mlx-audio on Apple Silicon, kokoro-onnx
+elsewhere) still available via TTS_BACKEND=kokoro."""
 
+import json
 import os
-import platform
-import sys
+import urllib.request
+import urllib.error
 
 import numpy as np
 
+import parlor.cloud as cloud
 
-def _is_apple_silicon() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+CLOUD_TTS_TIMEOUT = float(os.environ.get("CLOUD_TTS_TIMEOUT", "120"))
 
 
 class TTSBackend:
@@ -16,8 +20,54 @@ class TTSBackend:
 
     sample_rate: int = 24000
 
-    def generate(self, text: str, voice: str = "af_heart", speed: float = 1.1) -> np.ndarray:
+    def generate(self, text: str, voice: str = "", speed: float = 1.0) -> np.ndarray:
         raise NotImplementedError
+
+
+class CloudBackend(TTSBackend):
+    """OpenAI /v1/audio/speech. Returns raw 16-bit PCM (@24kHz) as a
+    float array; the server streams sentence calls and the client plays
+    whatever sample_rate audio_start announced."""
+
+    sample_rate: int = 24000
+    default_voice: str = os.environ.get("OPENAI_TTS_VOICE", "alloy")
+    _OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable",
+                      "onyx", "nova", "sage", "shimmer", "verse"}
+
+    def _map_voice(self, voice: str) -> str:
+        """Accept Kokoro voice ids too (generic — the caller might be a
+        fixture or a per-mode voice): gender is the only meaningful
+        signal there. af_* are the female voices, am_* the male ones;
+        any unknown voice falls back via the prefix."""
+        if not voice:
+            return self.default_voice
+        if voice in self._OPENAI_VOICES:
+            return voice
+        if voice.startswith("am_"):
+            return "echo"
+        if voice.startswith("af_"):
+            return self.default_voice if self.default_voice in self._OPENAI_VOICES else "alloy"
+        return self.default_voice
+
+    def generate(self, text: str, voice: str = "", speed: float = 1.0) -> np.ndarray:
+        body = {
+            "model": cloud.TTS_MODEL,
+            "voice": self._map_voice(voice),
+            "input": text,
+            "response_format": "pcm",  # raw 16-bit LE mono @24kHz
+        }
+        req = urllib.request.Request(
+            cloud.BASE_URL + "/audio/speech", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {cloud.API_KEY}"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=CLOUD_TTS_TIMEOUT) as resp:
+                pcm = np.frombuffer(resp.read(), dtype=np.int16)
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"TTS endpoint HTTP {e.code}: "
+                               f"{e.read()[:300]!r}") from e
+        return pcm.astype(np.float32) / 32768.0
 
 
 class MLXBackend(TTSBackend):
@@ -55,15 +105,19 @@ class ONNXBackend(TTSBackend):
 
 
 def load() -> TTSBackend:
-    """Load the best available TTS backend for this platform."""
-    if _is_apple_silicon() and not os.environ.get("KOKORO_ONNX"):
-        try:
-            backend = MLXBackend()
-            print(f"TTS: mlx-audio (Apple GPU, sample_rate={backend.sample_rate})")
-            return backend
-        except ImportError:
-            print("TTS: mlx-audio not installed, falling back to kokoro-onnx")
-
-    backend = ONNXBackend()
-    print(f"TTS: kokoro-onnx (CPU, sample_rate={backend.sample_rate})")
-    return backend
+    """Cloud TTS by default; Kokoro (local) only when explicitly asked."""
+    backend = os.environ.get("TTS_BACKEND", "").strip().lower()
+    if backend == "kokoro":
+        import platform
+        import sys
+        if sys.platform == "darwin" and platform.machine() == "arm64":
+            b = MLXBackend()
+            print(f"TTS: kokoro mlx-audio (Apple GPU, sample_rate={b.sample_rate})")
+            return b
+        b = ONNXBackend()
+        print(f"TTS: kokoro-onnx (CPU, sample_rate={b.sample_rate})")
+        return b
+    b = CloudBackend()
+    print(f"TTS: openai cloud ({cloud.TTS_MODEL}, voice={b.default_voice}, "
+          f"sample_rate={b.sample_rate})")
+    return b

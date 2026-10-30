@@ -76,7 +76,7 @@ def test_thinking_pause_is_held(session):
 def test_flush_answers_a_held_turn(session):
     """After a hold the client flushes; the model answers what it has.
     Covers the false-hold path: a finished question must not die in silence."""
-    t = session.turn(audio("long_question_male"))
+    t = session.turn(audio("long_question_held"))
     assert t.marker == "incomplete", \
         "fixture no longer trips the classifier — pick a voice that does"
     t = session.turn({"type": "flush"})
@@ -99,17 +99,18 @@ def test_flush_on_genuine_trailoff(session):
 
 # ── B. Speech overlap (chunk streaming during the utterance) ──────────────
 
-def test_chunked_speech_transcript_intact(server, session):
+def test_chunked_speech_transcript_intact(session):
+    """Chunked utterance: the streamed speech_chunk frames plus the final
+    segment must merge into ONE utterance and transcribe verbatim (the
+    local stack used this test to prove mid-utterance cache priming
+    didn't garble text; the cloud stack has no priming — what must hold
+    is that chunk-merging alone stays transcript-clean)."""
     chunks = fx.load_wav_chunks_b64("long_question")
-    primed_before = server.log().count("Primed cache")
     session.send_speech_chunks(chunks)
     t = session.turn({"audio": chunks[-1], "chunked": True}, timeout=120)
     assert t.marker == "complete"
     assert wer(ref_text("long_question"), t.transcription or "") <= WER_CLEAN
     assert_spoken_prose(t.text)
-    if server.log_path:
-        primed = server.log().count("Primed cache") - primed_before
-        assert primed >= len(chunks) - 1, f"only {primed} chunks primed the cache"
 
 
 # ── D. Camera ─────────────────────────────────────────────────────────────

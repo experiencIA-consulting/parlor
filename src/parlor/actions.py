@@ -1,34 +1,26 @@
 """The action decider: what the user asked the assistant to DO, decided by
-a separate grammar-forced JSON request instead of in-band control tags.
+a separate structured-JSON request instead of in-band control tags.
 
-Why a second request (benchmarks/archbench.py, e4b, 19 spoken cases x 2):
-in-band tags scored recall 0.955 with the miss being an ack-without-action
-("I will be quiet", no tag) — a spoken promise the server never keeps,
-the worst failure a voice assistant has. The decoupled head scored recall
-1.0, its only error an unwanted-but-cancellable timer misfire (0.062).
-Structurally, the head can never leak into speech (there is nothing to
-excise), runs at temperature 0 while speech keeps its sampling
-temperature, sees the model's own confirmation as evidence, and does the
-duration math itself ("twenty minutes" → 1200) in any language. History
-stays pure speech — no stored tag can teach the model a state the server
-isn't in.
+Why a second request (benchmarks/archbench.py in the on-device build):
+in-band tags scored recall 0.955 with the miss being an
+ack-without-action ("I will be quiet", no tag) — a spoken promise the
+server never keeps, the worst failure a voice assistant has. The
+decoupled head scored recall 1.0, its only error an unwanted-but-
+cancellable timer misfire (0.062). Structurally, the head can never leak
+into speech (there is nothing to excise), runs at temperature 0 while
+speech keeps its sampling temperature, sees the model's own
+confirmation as evidence, and does the duration math itself ("twenty
+minutes" → 1200) in any language. History stays pure speech — no stored
+tag can teach the model a state the server isn't in.
 
-Cost: the head decodes ~35 JSON tokens over the cached prefix (~2s GPU on
-e4b, hidden under TTS playback), every turn. A cheaper 1-token yes/no
-pre-gate was measured (archbench B_gated): its recall is a perfect 1.0,
-but it answers "yes" on nearly every turn — including "how are you" —
-so it adds ~0.9s and then runs the head anyway. Not worth its
-complexity; revisit only if per-turn GPU cost shows up in practice.
-
-The head must run on the SAME llama-server as speech: a separate model
-would pay full prefill of history + audio every turn — the shared prefix
-cache is what makes deciding cheap.
+It runs on the same chat endpoint as speech, as one small structured
+call per turn: cheap on cloud APIs, and it keeps the guarantee that a
+spoken promise is always kept.
 """
 
-import json
 from dataclasses import dataclass
 
-from parlor import llama
+from parlor import cloud
 
 # One prompt per session mode: the head must know what "no change" means
 # ("conversation" reported while already conversing is state, not an
@@ -123,17 +115,17 @@ def decide_before(history: list, content: list, current_mode: str) -> ActionDeci
 
 
 def _decide(build, current_mode: str) -> ActionDecision:
-    """One grammar-forced head call. Failures return NONE: a lost
+    """One structured-JSON head call. Failures return NONE: a lost
     decision is a no-op turn, never an exception in the turn loop."""
     try:
         head_prompt = _HEAD_COMMON.format(mode_clause=_MODE_CLAUSES[current_mode])
         # max_tokens must clear the JSON skeleton (~30 tokens) PLUS a long
         # restated research task — truncated JSON fails json.loads and
         # silently drops an action the reply already promised (review
-        # finding). The grammar bounds the shape, so the cap is generous.
-        raw = llama.chat_blocking(build(head_prompt), max_tokens=192,
+        # finding). The schema bounds the shape, so the cap is generous.
+        raw = cloud.chat_blocking(build(head_prompt), max_tokens=192,
                                   temperature=0.0, json_schema=HEAD_SCHEMA)
-        head = json.loads(raw)
+        head = cloud.parse_json(raw)
     except Exception as e:
         print(f"Action decider failed: {e}")
         return NONE

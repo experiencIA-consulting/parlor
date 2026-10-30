@@ -125,12 +125,12 @@ def test_instruction_echo_is_detected_against_production_prompts():
     flush = server.FLUSH_PROMPT.format(camera="")
     # The observed leak: instruction text verbatim (with or without the
     # model tacking invented words on the end).
-    assert echoes_instruction("The user paused mid-thought, so on a new line:", flush)
+    assert echoes_instruction("The user paused mid-thought and stayed quiet:", flush)
     assert echoes_instruction(
-        "The user paused mid-thought, so on a new line: hello there", flush)
+        "The user paused mid-thought and stayed quiet: hello there", flush)
     respond = server.RESPOND_PROMPT.format(camera="")
     assert echoes_instruction(
-        "followed by the exact words the user said in their audio message", respond)
+        "respond to what the user said, in one short sentence now", respond)
 
 
 def test_genuine_transcripts_pass_the_echo_guard():
@@ -176,14 +176,12 @@ def test_no_speech_annotations_are_not_user_words():
 
 
 def test_quoted_prompt_phrases_are_not_echoes():
-    # The translate prompt QUOTES the exit phrases users actually say — a
-    # genuine "go back to normal conversation" must not read as an
-    # instruction echo (pre-fix it did, and the no-transcript tag gate
-    # then dropped the <mode>conversation</mode> exit).
+    # "go back to normal conversation" is/runs the exit path; a genuine
+    # utterance phrased that way must not be suppressed wholesale.
     from parlor import server
     said = "Okay, stop translating now and go back to normal conversation."
     assert not echoes_instruction(said, server.TRANSLATE_PROMPT)
     # Unquoted instruction prose still reads as an echo.
     assert echoes_instruction(
-        "If the audio has no clear words write no speech instead",
+        "The English translation of the words above, now.",
         server.TRANSLATE_PROMPT)

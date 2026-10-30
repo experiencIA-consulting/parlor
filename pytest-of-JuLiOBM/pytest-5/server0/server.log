@@ -1,0 +1,46 @@
+INFO:     Started server process [5908]
+INFO:     Waiting for application startup.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Turn detector: p(complete)=0.99 (77ms)
+Turn detector loaded (smart-turn-v3.2).
+TTS: openai cloud (gpt-4o-mini-tts, voice=alloy, sample_rate=24000)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://localhost:8821 (Press CTRL+C to quit)
+INFO:     127.0.0.1:63378 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63379 - "WebSocket /ws" [accepted]
+INFO:     connection open
+Turn detector: p(complete)=0.99 (234ms)
+LLM (1.44s, prefill 1.138s) heard: None → "Sure! Just let me know what you want to say, and I'll translate it into English for you."
+Action decision: ActionDecision(timer=None, mode='translate', research=None)
+Mode → translate
+LLM (1.01s, prefill 0.919s) heard: None → 'What is the capital of France?'
+INFO:     connection closed
+INFO:     127.0.0.1:61986 - "WebSocket /ws" [accepted]
+INFO:     connection open
+Turn detector: p(complete)=0.99 (131ms)
+Action decision: ActionDecision(timer=None, mode=None, research='What is the capital of France?')
+LLM (1.08s, prefill 0.734s) heard: None → 'Sure! Just speak naturally, and I’ll translate everything you say into English. What would you like to talk about?'
+Action decision: ActionDecision(timer=None, mode='translate', research=None)
+Mode → translate
+LLM (0.80s, prefill 0.613s) heard: None → 'So, the thing I wanted to ask you about is the w-'
+INFO:     connection closed
+INFO:     127.0.0.1:65011 - "WebSocket /ws" [accepted]
+INFO:     connection open
+Turn detector: p(complete)=0.99 (262ms)
+LLM (0.83s, prefill 0.578s) heard: None → 'Sure! I’ll translate everything you say into English from now on. Just go ahead and speak!'
+Action decision: ActionDecision(timer=None, mode='translate', research=None)
+Mode → translate
+LLM (0.95s, prefill 0.755s) heard: None → 'Okay, stop translating now, and go back to normal conversation.'
+Action decision: ActionDecision(timer=None, mode='conversation', research=None)
+Mode → conversation
+Turn detector: p(complete)=0.98 (241ms)
+LLM (1.02s, prefill 0.729s) heard: None → "The capital of France is Paris. It's known for its art, fashion, and culture. Have you ever been there?"
+INFO:     connection closed
+INFO:     127.0.0.1:51094 - "WebSocket /ws" [accepted]
+INFO:     connection open
+Turn detector: p(complete)=0.99 (244ms)
+LLM (0.99s, prefill 0.705s) heard: None → "Sure! I'll translate everything you say into English. What would you like to talk about?"
+Action decision: ActionDecision(timer=None, mode='translate', research=None)
+Mode → translate
+Mode → conversation
+INFO:     connection closed

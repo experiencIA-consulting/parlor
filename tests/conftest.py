@@ -20,6 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # for the key check
 
 import fixtures  # resolved via pythonpath = ["benchmarks"] (pyproject.toml)
 
@@ -110,6 +113,10 @@ class Server:
 
 @pytest.fixture(scope="session")
 def server(tmp_path_factory, reasoner_mock) -> Server:
+    if not (os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("PARLOR_TEST_URL")):
+        pytest.skip("OPENAI_API_KEY not set — the e2e suite runs the real "
+                    "server, which now speaks through the OpenAI STT/TTS APIs")
     fixtures.generate_all()
 
     external = os.environ.get("PARLOR_TEST_URL")
@@ -138,8 +145,9 @@ def server(tmp_path_factory, reasoner_mock) -> Server:
     # coin flip and some run always loses one. Production recall at real
     # temperature is tagbench --production's job, not the suite's.
     env = {**os.environ, "PORT": str(TEST_PORT), "LLAMA_PORT": str(TEST_LLAMA_PORT),
-           "LLAMA_CTX": "4096", "MODEL": os.environ.get("MODEL", "e4b"),
+           "MODEL": os.environ.get("MODEL", "e4b"),
            "TEMPERATURE": os.environ.get("TEMPERATURE", "0"),
+           "PYTHONUTF8": "1",  # server logs must not die on any reply's text
            "REASONER_BASE_URL": f"http://127.0.0.1:{TEST_REASONER_PORT}/v1",
            "REASONER_API_KEY": "test-key", "REASONER_MODEL": "mock-model",
            "REASONER_TIMEOUT": "20",
@@ -160,6 +168,8 @@ def server(tmp_path_factory, reasoner_mock) -> Server:
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
+        if os.name == "nt":  # no llama-server child on Windows, no lsof/bash
+            return          # (bash '' printed UTF-16 'Acceso denegado' garbage)
         subprocess.run(["bash", "-c", f"kill $(lsof -ti :{TEST_LLAMA_PORT}) 2>/dev/null"])
 
     try:

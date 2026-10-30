@@ -224,9 +224,12 @@ function connect() {
       if (msg.proactive) {
         // Server-initiated delivery: its "transcript" is the model's own
         // echo, and there is no pending user bubble to fill or remove.
-      } else if (!msg.spoke && !msg.transcription) {
+      } else if (!(msg.spoke || msg.transcription)) {
         removePendingUserBubble();  // glitch/empty turn — nothing was heard
-      } else {
+      } else if (msg.transcription) {
+        // A spoken turn normally carries no transcript line now (the
+        // words rode the earlier 'transcript' frame): never clobber that
+        // bubble with '…'.
         fillUserBubble(msg.transcription);
       }
       const t = msg.timings || {};

@@ -110,8 +110,13 @@ class Session:
                 self.send({"type": "ready"})
                 return t
             elif kind == "turn_final":
-                t.transcription = msg.get("transcription")
                 t.timings = msg.get("timings", {})
+                # The cloud protocol has no in-band transcript line: the
+                # transcript always rode the earlier 'transcript' frame,
+                # and turn_final's field stays None — it must not clobber
+                # that value (mirrors the browser client).
+                if msg.get("transcription") is not None:
+                    t.transcription = msg.get("transcription")
                 if not msg.get("spoke", True):
                     t.marker = "released"
                     self.send({"type": "ready"})

@@ -9,7 +9,9 @@ The Whisper-style log-mel features the model takes as input are computed by
 the vendored numpy-only code in the second half of this module.
 """
 
+import os
 import time
+from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
@@ -20,6 +22,18 @@ HF_FILE = "smart-turn-v3.2-cpu.onnx"
 SAMPLE_RATE = 16000
 WINDOW_SECONDS = 8  # the model judges the last 8 seconds of the utterance
 
+# A project-local cache by default: the default ~/.cache/huggingface is
+# not always writable (locked-down Windows profiles), and even the xet
+# chunk downloader writes into it independently of the download call.
+# Before huggingface_hub is imported anywhere, point the WHOLE HF stack —
+# hub cache, xet cache and logs included — at .hf-cache (git-ignored).
+_HF_CACHE = str(Path(__file__).resolve().parents[2] / ".hf-cache")
+os.environ.setdefault("HF_HOME", _HF_CACHE)
+os.environ.setdefault("HF_HUB_CACHE", os.path.join(_HF_CACHE, "hub"))
+os.environ.setdefault("HF_XET_CACHE_DIR", os.path.join(_HF_CACHE, "xet"))
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
 
 class TurnDetector:
     def __init__(self, model_path: str | None = None):
@@ -28,7 +42,8 @@ class TurnDetector:
             try:
                 model_path = hf_hub_download(HF_REPO, HF_FILE)
             except Exception:  # offline — use the local cache
-                model_path = hf_hub_download(HF_REPO, HF_FILE, local_files_only=True)
+                model_path = hf_hub_download(
+                    HF_REPO, HF_FILE, local_files_only=True)
 
         so = ort.SessionOptions()
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
