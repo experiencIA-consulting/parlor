@@ -29,3 +29,7 @@ default.profraw
 .vscode/
 .env
 /.vs
+.vs/
+
+# pytest basetemp (el TMP de este host aterriza dentro del workspace)
+pytest-of-*/
