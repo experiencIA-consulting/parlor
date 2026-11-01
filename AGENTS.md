@@ -138,3 +138,16 @@ Tres iteraciones de economía de tokens / privacidad / expresividad sobre el mis
 - El Uvicorn de desarrollo no usa `reload`; reiniciar el proceso después de cambios en `server.py` y recargar sin caché tras cambios de JS/CSS.
 - Validación local sin APIs reales: **40 passed** en `test_text_turn.py`, `test_stream_parser.py`, `test_personas.py`, `test_reasoner.py` y `test_bind.py`; `node --check` y compilación Python también pasan.
 - Pendiente validar manualmente la interfaz en navegador/móvil. Una ejecución parcial de pruebas e2e que consume APIs reales tuvo un fallo en `test_spoken_command_exits_listen_and_conversation_resumes`; no se repitió para evitar más coste. La suite e2e completa no se ejecutó.
+
+### Ajustes de interfaz posteriores
+
+- **Preview de cámara colapsable** (`index.html`, `app.js`, `style.css`): `#cameraPreview` envuelve `#viewportWrap`. `setCameraUI()` cambia `is-open`/`is-collapsed`, `aria-hidden` e `inert`; se cierra con cámara apagada y usa transición CSS de grid/opacity, respetando `prefers-reduced-motion`.
+- **Scroll de conversación**: `#messages.transcript` es el scroll interno. El `body`/`.portal-stack` mantienen una geometría de viewport para que la conversación ocupe el espacio flexible; `overscroll-behavior: contain` evita que wheel/touch encadene al scroll de página. `followLatestMessage` mantiene el final a la vista mientras el usuario ya estaba abajo, pero respeta la lectura hacia arriba; enviar un mensaje propio vuelve al final.
+- Validación de estas modificaciones: `node --check src/parlor/web/static/app.js`, `git diff --check` y **27 passed** en `test_text_turn.py` + `test_stream_parser.py`. No se hizo verificación visual con navegador.
+
+## 8. Índice codebase-memory
+
+- Proyecto: `C-xampp-htdocs-parlor` (`C:/xampp/htdocs/parlor`, rama `HP240RG10-dev`), indexado en modo `full` mediante el servidor MCP `codebase-memory-mcp`.
+- Última reindexación completa (2026-11-01): `ready`, 865 nodos y 3638 aristas; no hubo `skipped` ni `parse_partial`. `.env`, logs, `.git`, `.hf-cache`, `.venv` y caches de ejecución quedan excluidos deliberadamente; no se persistió un artefacto dentro del repo.
+- `check_index_coverage` no registró gaps en `AGENTS.md` ni los archivos UI consultados, pero marcó `freshness: metadata_changed`; el grafo es un punto de partida, no una fuente de verdad frente al árbol actual.
+- El grafo es un índice externo y puede quedar desfasado tras cambios. Antes de confiar en relaciones estructurales, consultar `index_status`; después de cambios grandes, reindexar. `check_index_coverage` es best-effort: sus ausencias no garantizan exhaustividad y cualquier fuente relevante debe contrastarse con el archivo actual.
