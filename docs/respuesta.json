@@ -1,0 +1,47 @@
+{
+    "ok": true,
+    "conversation_uuid": "7f249cfd-f378-40b5-8a73-9bbbbd139519",
+    "reply": "Te lo resumo así: al despertar, V-Itaren con un vaso grande de agua; antes de cada comida, la cápsula de V-Glucalose, y junto con el desayuno y la comida el V-Organex más las tres cápsulas de Omega 3. Deja el V-Itaren separado de los alimentos por unos treinta minutos y reparte el agua a lo largo del día. ¿Quieres que te lo envíe también por escrito para que lo tengas a mano?",
+    "messages": [
+        {
+            "role": "user",
+            "content": "¿Que se le puede recomendar a una persona para ayudarle con su diabetes?",
+            "created_at": "2026-11-01T03:13:28.000000Z"
+        },
+        {
+            "role": "assistant",
+            "content": "🌿 <b>Apoyo nutricional en el manejo de la glucosa</b>\n\nEntiendo tu pregunta. Antes de entrar en materia, una aclaración importante: la diabetes es una condición que requiere seguimiento médico, y desde el acompañamiento naturista lo que podemos hacer es <b>apoyar el metabolismo de los carbohidratos y el bienestar general</b>, nunca sustituir el tratamiento ni la vigilancia de tu médico.\n\nDicho esto, en el marco de un acompañamiento metabólico integral, los productos que suelen considerarse son:\n\n💊 <b>V-Glucalose</b> — 1 cápsula cada 8 horas, antes de cada comida. Formulado con nopal, chaya, berberina, cardo mariano y fenogreco para apoyar el metabolismo de los carbohidratos y una respuesta saludable a la glucosa.\n\n💧 <b>V-Itaren</b> — 1 cápsula cada 8 horas. Apoyo depurativo y equilibrio hídrico; útil cuando hay retención de líquidos o se busca acompañar la función renal.\n\n🫀 <b>V-Nitro</b> — 1/2 gotero sublingual cada 8 horas. Favorece la circulación y la oxigenación celular, aspecto relevante en el terreno metabólico.\n\n🌱 <b>V-Organex</b> — 1 cápsula cada 8 horas. Apoyo depurativo general del organismo.\n\n🐟 <b>V-Omega3</b> — 3 cápsulas al día acompañando alimentos. Apoyo cardiovascular y mantenimiento de niveles saludables de lípidos.\n\n✅ <b>Hábitos que potencian el acompañamiento</b>\n• Prioriza fibra vegetal en cada comida (verduras de hoja, chía, linaza).\n• Hidratación constante a lo largo del día.\n• Caminata ligera de 10–15 minutos después de comer.\n• Evita azúcares refinados y harinas blancas.\n• Registro periódico de glucosa para ver tu tendencia real.\n\n🧡 <b>Nota personalizada</b>\nSi esta pregunta es para ti, recuerda que en tu última valoración aparecieron <b>triglicéridos en nivel crítico</b> y <b>peristalsis disminuida con estreñimiento</b>. En tu caso el enfoque prioritario sería el eje digestivo y metabólico-lipídico (fibra, hidratación y apoyo hepático), ya que sin una vía digestiva libre el resto de los apoyos pierde biodisponibilidad. Si quieres, puedo detallarte ese enfoque.\n\n⚠️ <b>Importante:</b> estos productos son apoyo nutricional general y no sustituyen medicamentos, insulina ni controles médicos. No suspendas ni modifiques tu tratamiento sin autorización.\n\nConsulta siempre con un profesional de salud.",
+            "created_at": "2026-11-01T03:13:28.000000Z"
+        },
+        {
+            "role": "user",
+            "content": "¿Y cual es la función de vitaren en esta recomendación?",
+            "created_at": "2026-11-01T03:44:33.000000Z"
+        },
+        {
+            "role": "assistant",
+            "content": "V-Itaren es un apoyo depurativo y de equilibrio de líquidos: acompaña la función renal y la eliminación de toxinas, lo que ayuda cuando hay retención o hinchazón, pero no actúa directamente sobre la glucosa. En el contexto metabólico se usa como soporte del terreno, no como tratamiento de la diabetes. ¿Quieres que te explique cómo se combinaría con el resto?",
+            "created_at": "2026-11-01T03:44:34.000000Z"
+        },
+        {
+            "role": "user",
+            "content": "Sí, explique cómo se combinaría con el resto.",
+            "created_at": "2026-11-01T04:12:52.000000Z"
+        },
+        {
+            "role": "assistant",
+            "content": "Se combina como apoyo de fondo: V-Itaren ayuda a que el riñón elimine lo que los demás productos movilizan, así que va de la mano con V-Organex y V-Glucalose, que trabajan depuración y metabolismo de la glucosa, y con el Omega 3 para el tema de los lípidos. Conviene tomarlo con buena cantidad de agua durante el día y separado de las comidas principales, para que el efecto depurativo se sienta como alivio y no como molestia. ¿Quieres que te arme el orden de toma a lo largo del día?",
+            "created_at": "2026-11-01T04:12:52.000000Z"
+        },
+        {
+            "role": "user",
+            "content": "Sí, dame el orden de toma a lo largo del día.",
+            "created_at": "2026-11-01T06:12:40.000000Z"
+        },
+        {
+            "role": "assistant",
+            "content": "Te lo resumo así: al despertar, V-Itaren con un vaso grande de agua; antes de cada comida, la cápsula de V-Glucalose, y junto con el desayuno y la comida el V-Organex más las tres cápsulas de Omega 3. Deja el V-Itaren separado de los alimentos por unos treinta minutos y reparte el agua a lo largo del día. ¿Quieres que te lo envíe también por escrito para que lo tengas a mano?",
+            "created_at": "2026-11-01T06:12:40.000000Z"
+        }
+    ]
+}

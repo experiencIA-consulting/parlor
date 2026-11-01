@@ -1,0 +1,12 @@
+curl --location 'https://test.bioscanvital.com/api/v1/ani/patient/messages' \
+  --header 'Authorization: Bearer <CLAVE_API_DEL_AGENTE>' \
+  --header 'X-Patient-Voice-Token: <VOICE_TOKEN_DEL_PACIENTE>' \
+  --header 'X-Voice-Conversation-UUID: <UUID_DEVUELTO>' \
+  --header 'Idempotency-Key: <CONSECUTIVO_CONVERSACION>' \
+  --header 'Content-Type: application/json' \
+  --header 'Accept: application/json' \
+  --data-raw '{
+    "message": "<MENSAJE>",
+    "style": "voice",
+    "include_history": true
+  }'

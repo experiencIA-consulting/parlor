@@ -1,6 +1,6 @@
 """The streaming turn pipeline: message-content helpers, the incremental
-response/transcript parser, and run_turn (decode → sentences → TTS, all
-pipelined)."""
+response/transcript parser, and run_turn (decode → sentences → optional TTS,
+all pipelined)."""
 
 import asyncio
 import base64
@@ -141,9 +141,14 @@ async def speak_only(ws, line: str, tts_backend, tts_voice: str = "",
                                                instructions=tts_instructions))
     except Exception as e:
         print(f"Fallback TTS failed: {e}")
-        await release_client(ws)
+        await send_json(ws, {"type": "text_delta", "text": line + " "})
+        await send_json(ws, {"type": "turn_final", "transcription": None,
+                             "proactive": False, "timings": {},
+                             "p_complete": None, "spoke": False,
+                             "output": "text", "tts_failed": True})
         return False
     pcm_int16 = (pcm * 32767).clip(-32768, 32767).astype(np.int16)
+    await send_json(ws, {"type": "text_delta", "text": line + " "})
     await send_json(ws, {"type": "audio_start",
                          "sample_rate": tts_backend.sample_rate})
     await send_json(ws, {"type": "audio_chunk",
@@ -151,7 +156,8 @@ async def speak_only(ws, line: str, tts_backend, tts_voice: str = "",
                          "index": 0})
     await send_json(ws, {"type": "turn_final", "transcription": None,
                          "proactive": False, "timings": {},
-                         "p_complete": None, "spoke": True})
+                         "p_complete": None, "spoke": True,
+                         "output": "spoken", "tts_failed": False})
     await send_json(ws, {"type": "audio_end", "tts_time": 0})
     return True
 
@@ -306,7 +312,9 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
                    proactive: bool = False,
                    fallback: str | None = None,
                    instruction: str | None = None,
-                   tts_instructions: str = ""
+                   tts_instructions: str = "",
+                   tts_enabled: bool = True,
+                   request_id: str | None = None,
                    ) -> tuple[str, int | None, bool, bool]:
     """Stream one model turn: decode → sentences → TTS, all pipelined.
     Returns the raw generated text, the request's real prompt token count
@@ -315,7 +323,9 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
     instruction echo, so no user words stand behind the turn and the
     caller must not store it or act on it — and spoke: whether any TTS
     audio was sent; the caller's floor bookkeeping must key on it, not
-    the text (a reply that only annotates has text but plays nothing).
+    the text (a reply may be text-only or only annotate and play nothing).
+    tts_enabled=False streams response text without making TTS requests;
+    a failed TTS request also preserves the generated text.
 
     proactive marks a server-initiated turn (delegation delivery): no
     transcript frame is sent and turn_final carries proactive=True — the
@@ -346,18 +356,26 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
     producer = loop.run_in_executor(None, produce)
 
     sentence_q: asyncio.Queue = asyncio.Queue()
-    audio_state = {"started": False, "first_audio_at": None, "chunks": 0}
+    audio_state = {"started": False, "first_audio_at": None, "chunks": 0,
+                   "tts_failed": False}
 
     async def tts_worker():
         while True:
             sentence = await sentence_q.get()
             if sentence is _DONE:
                 return
-            if interrupted.is_set():
+            if interrupted.is_set() or not tts_enabled or audio_state["tts_failed"]:
                 continue  # keep draining
-            pcm = await loop.run_in_executor(
-                None, lambda s=sentence: tts_backend.generate(
-                    s, voice=tts_voice, instructions=tts_instructions))
+            try:
+                pcm = await loop.run_in_executor(
+                    None, lambda s=sentence: tts_backend.generate(
+                        s, voice=tts_voice, instructions=tts_instructions))
+            except Exception as e:
+                # A TTS outage must not discard a valid text response. Stop
+                # spending on later sentence requests and finish text-only.
+                audio_state["tts_failed"] = True
+                print(f"TTS failed: {e}")
+                continue
             if interrupted.is_set():
                 continue
             if not audio_state["started"]:
@@ -428,10 +446,14 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
             if NO_SPEECH_RE.match(sentence):
                 print(f"Sentence suppressed (annotation): {sentence!r}")
                 continue
-            if tts_started_at is None:
+            if tts_enabled and tts_started_at is None:
                 tts_started_at = time.time()
-            await send_json(ws, {"type": "text_delta", "text": sentence + " "})
-            sentence_q.put_nowait(sentence)
+            delta = {"type": "text_delta", "text": sentence + " "}
+            if request_id is not None:
+                delta["request_id"] = request_id
+            await send_json(ws, delta)
+            if tts_enabled:
+                sentence_q.put_nowait(sentence)
 
     try:
         while True:
@@ -501,6 +523,9 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
         "timings": timings,
         "p_complete": p_complete,
         "spoke": audio_state["started"],  # False → client must not wait for audio_end
+        "output": "spoken" if audio_state["started"] else "text",
+        "tts_failed": audio_state["tts_failed"],
+        **({"request_id": request_id} if request_id is not None else {}),
     })
     if audio_state["started"]:
         await send_json(ws, {"type": "audio_end",
@@ -516,4 +541,3 @@ async def prime_cache(messages: list) -> None:
     priming has no effect. Kept as a no-op so call sites (and
     benchmarks) don't have to branch."""
     return None
-

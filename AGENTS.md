@@ -2,7 +2,7 @@
 
 Este archivo registra la migración de Parlor a **arquitectura 100 % cloud (OpenAI / OpenRouter)**, realizada en esta rama (`HP240RG10-dev`). Sirve como dossier de requisitos, plan, cambios y observaciones de depuración para que los futuros agentes no redescubran lo mismo. Escrito en español por convención del mantenedor; los identificadores de código quedan en inglés.
 
-Última actualización: 2026-10-30.
+Última actualización: 2026-11-01.
 
 ---
 
@@ -99,3 +99,40 @@ Tres iteraciones de economía de tokens / privacidad / expresividad sobre el mis
    Coste de personas: la cláusula de persona ~30-60 tokens/request en el system prompt; las `instructions` van en el input del TTS (centavos/min); cada preview ▶ es un TTS deliberado.
 
 4. **`PARLOR_HOST` — bind configurable de pruebas móviles** (`server.py:main`, `tests/test_bind.py`): el default SIGUE siendo `localhost` a propósito (contexto seguro del navegador). `PARLOR_HOST=0.0.0.0` expone LAN pero NO da micrófono/cámara al móvil: necesita que el dispositivo marque el origen seguro (flag `unsafely-treat-insecure-origin-as-secure` de Chrome) o HTTPS válido delante (Tailscale). El print de advertencia de main() lo recuerda en el arranque. Regla de firewall la maneja el mantenedor (no va en código).
+
+## 7. Plan aprobado: entrada de texto y control de voz de respuesta
+
+### Comportamiento acordado
+
+- Añadir un formulario para que el usuario escriba y envíe mensajes. Cada envío aparece como globo de usuario y se incorpora al historial server-owned de la sesión; el servidor no debe tratarlo como transcripción ni llamar a STT.
+- Añadir el check bilingüe **“Hablar respuesta / Speak reply”**, activado por defecto y mantenido durante la sesión. Solo controla las respuestas a entradas escritas; las respuestas a voz conservan su comportamiento actual. Desactivado significa no solicitar/generar TTS, no simplemente silenciarlo en el navegador.
+- Deshabilitar el formulario mientras el asistente piensa o habla, o mientras haya un turno de voz en curso/retención smart-turn.
+- En modo `listen`, una entrada escrita sí solicita una respuesta. En modo `translate`, ofrecer por envío un selector **“Traducir / Translate”** o **“Conversar / Chat”**, recordando la última opción usada como valor inicial. La selección es por mensaje y no cambia el modo de sesión.
+- Si la cámara está activada, adjuntar al mensaje escrito una captura actual. Cámara apagada debe seguir significando que no se envían imágenes.
+- Indicadores en globos: 🎙️ entrada por voz, ⌨️ entrada escrita, 🔊 respuesta hablada y 📝 respuesta solo escrita. El texto de una respuesta hablada también permanece visible. El indicador refleja el resultado efectivo del turno; ante fallo de TTS, conservar la respuesta de texto y marcarla como escrita.
+- Si falla el envío o el proveedor antes de obtener respuesta, conservar el globo del usuario, mostrar el error y ofrecer reintento. El reintento debe evitar duplicar el mensaje en el historial dentro de la misma sesión. La conversación sigue teniendo el alcance actual: se reinicia al reconectar el WebSocket.
+- Etiquetas visibles nuevas en español e inglés. Los emojis deben tener nombres accesibles bilingües (`aria-label`/texto para lectores de pantalla), no ser el único nombre accesible del canal.
+
+### Secuencia de implementación
+
+1. **UI** (`src/parlor/web/index.html`, `src/parlor/web/static/style.css`): agregar textarea, botón de envío, check de voz, selector por envío para `translate` y estados visuales de envío/error. Usar etiquetas bilingües; propuesta de teclado: Enter envía y Shift+Enter inserta salto de línea.
+2. **Cliente** (`src/parlor/web/static/app.js`): crear el globo del usuario al enviar, marcar su canal, mandar un evento WebSocket explícito con ID de petición, texto, preferencia TTS, acción elegida y fotograma opcional. Deshabilitar/rehabilitar el formulario según turnos de voz y estados `processing`/`speaking`; correlacionar resultado/error/reintento por ID. Renderizar texto de usuario como texto (`textContent`), nunca interpolarlo como HTML.
+3. **Servidor** (`src/parlor/server.py`): reconocer el evento escrito explícitamente y procesarlo sin STT ni smart-turn. Incorporar el texto una sola vez al historial, permitir respuesta en `listen`, aplicar la acción elegida por mensaje en `translate` y adjuntar la imagen enviada si la cámara estaba activa. Mantener acciones existentes (p. ej. investigación/timers) cuando correspondan.
+4. **Pipeline** (`src/parlor/pipeline.py`): permitir que un turno transmita texto sin sintetizar audio cuando TTS está desactivado; mantener el flujo de audio actual para turnos hablados. Exponer el resultado real del canal para que el cliente marque 🔊 o 📝, incluidos fallos de TTS sin perder la respuesta textual.
+5. **Pruebas**: añadir cobertura unitaria/mockeada para entrada escrita sin STT, almacenamiento sin duplicados, respuestas escritas sin TTS, respuestas habladas, `listen`, ambas acciones de `translate`, cámara opt-in, estados de error/reintento e indicadores. Completar con pruebas manuales del formulario, teclado, móvil y accesibilidad. Evitar tests nuevos que consuman APIs reales; ver §4.8.
+
+### Criterios de aceptación
+
+- Enviar texto lo muestra en el chat y lo agrega al historial sin transcribir audio.
+- Con el check desactivado no hay llamada TTS; con él activado se usa la voz/persona activa.
+- `listen` responde a texto; en `translate` se aplica la acción elegida para ese envío sin cambiar el modo de sesión.
+- El envío queda bloqueado durante generación/reproducción del asistente o un turno de voz pendiente.
+- La imagen solo se incluye cuando la cámara está activada y corresponde a una captura actual.
+- Los globos identifican el canal de entrada y el resultado de salida; los errores no borran el mensaje del usuario.
+- Las pruebas automatizadas no requieren la clave real ni generan costes de chat/STT/TTS.
+
+### Estado al 2026-11-01
+
+- Implementados el formulario, los eventos `text_turn`/`turn_error`, la traducción por mensaje, el control de TTS, las etiquetas de canal y el reintento idempotente dentro de la sesión.
+- Validación local sin APIs reales: **39 passed** en `test_text_turn.py`, `test_stream_parser.py`, `test_personas.py`, `test_reasoner.py` y `test_bind.py`; `node --check` y compilación Python también pasan.
+- Pendiente validar manualmente la interfaz en navegador/móvil. Una ejecución parcial de pruebas e2e que consume APIs reales tuvo un fallo en `test_spoken_command_exits_listen_and_conversation_resumes`; no se repitió para evitar más coste. La suite e2e completa no se ejecutó.

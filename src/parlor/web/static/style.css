@@ -287,6 +287,7 @@
   .transcript::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
 
   .msg {
+    position: relative;
     padding: 10px 14px;
     border-radius: 12px;
     font-size: 13.5px;
@@ -321,6 +322,124 @@
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
   }
+
+  .msg .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  .channel-badge {
+    float: right;
+    margin: 0 0 3px 9px;
+    font-size: 12px;
+    line-height: 1.4;
+    cursor: help;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* ── Typed-message composer ── */
+  .composer {
+    width: 100%;
+    max-width: 640px;
+    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 12px 4px 2px;
+    z-index: 2;
+  }
+
+  .composer textarea {
+    width: 100%;
+    min-height: 44px;
+    max-height: 140px;
+    resize: vertical;
+    padding: 12px 14px;
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.045);
+    color: var(--c-text-bright);
+    font: 14px/1.45 var(--font-body);
+  }
+
+  .composer textarea::placeholder { color: var(--c-text-dim); }
+  .composer textarea:focus-visible,
+  .composer select:focus-visible,
+  .send-btn:focus-visible,
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--c-listen);
+    outline-offset: 2px;
+  }
+
+  .send-btn {
+    align-self: stretch;
+    padding: 0 16px;
+    border: 1px solid rgba(74,222,128,0.2);
+    border-radius: 12px;
+    background: var(--c-listen-dim);
+    color: var(--c-listen);
+    font: 600 12px var(--font-body);
+    cursor: pointer;
+  }
+
+  .send-btn:hover:not(:disabled) { background: rgba(74,222,128,0.2); }
+  .send-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .composer-options {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    min-height: 24px;
+    padding: 0 4px;
+    color: var(--c-text-dim);
+    font-size: 11px;
+  }
+
+  .composer-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+  }
+
+  .composer-option input { accent-color: var(--c-listen); }
+
+  .composer select {
+    max-width: 190px;
+    padding: 5px 8px;
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 8px;
+    background: #11131a;
+    color: var(--c-text);
+    font: 11px var(--font-body);
+  }
+
+  .action-option[hidden] { display: none; }
+  .composer-status { margin-left: auto; }
+
+  .retry-btn {
+    margin-left: 8px;
+    padding: 2px 7px;
+    border: 1px solid rgba(248,113,113,0.24);
+    border-radius: 7px;
+    background: transparent;
+    color: #fca5a5;
+    font: 600 10px var(--font-body);
+    cursor: pointer;
+  }
+
+  .msg .turn-status { color: #fca5a5; }
+  .msg .turn-status.sent { color: var(--c-text-dim); }
 
   /* Active session mode (translation) with its escape hatch */
   .mode-chip {
@@ -573,6 +692,10 @@
     .on-device-pill { display: none; }   /* duplicate of the model label */
     .waveform-wrap { margin-top: 10px; height: 40px; }
     .transcript { margin-top: 10px; }
+    .composer { padding-top: 8px; gap: 7px; }
+    .composer textarea { min-height: 42px; padding: 10px 11px; }
+    .send-btn { padding: 0 11px; }
+    .composer-options { gap: 7px 12px; font-size: 10.5px; }
     /* The catalog panel is anchored to the chip's left edge on desktop;
        with the controls centered on a narrow screen that anchor can run
        off the right edge, so pin it to the viewport center here. */

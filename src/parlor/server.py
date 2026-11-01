@@ -57,19 +57,16 @@ from parlor.pipeline import (estimate_tokens, image_part, merge_wavs,
                              speak_only, text_part, valid_audio,
                              wav_to_float32)
 
-# Turn completeness is judged by the smart-turn audio classifier before the
-# LLM is involved, so the prompt carries no FINISHED/WAIT machinery at all.
-# The user's words now arrive PRE-transcribed (OpenAI speech API — see
-# cloud.py) instead of being heard by the model itself, and that fact is
-# stated here once so the transcript is treated as speech, not typed text.
+# Turn completeness is judged by smart-turn for audio before the LLM is
+# involved, so prompts carry no FINISHED/WAIT machinery. Spoken words arrive
+# pre-transcribed by OpenAI STT; typed messages stay ordinary text.
 SYSTEM_PROMPT = (
-    "You are a friendly, conversational AI assistant. The user talks to you "
-    "through a microphone and may show you their camera: each message starts "
-    "with a transcript of what they actually SAID (spoken words, not typing). "
-    "Your replies are spoken aloud, so write plain conversational text "
-    "without formatting. If a message's transcript is just your own previous "
-    "reply playing back (echo), don't answer it — briefly ask what they'd "
-    "like to talk about."
+    "You are a friendly, conversational AI assistant. The user may type a "
+    "message, speak (which arrives as a transcript of what they actually "
+    "said), and may show you their camera. Respond naturally in plain text; "
+    "some replies are spoken aloud and others are text-only. If a speech "
+    "transcript is just your own previous reply playing back (echo), don't "
+    "answer it — briefly ask what they'd like to talk about."
 )
 
 # The model's replies are pure speech: it never emits control markup.
@@ -114,6 +111,17 @@ TRANSLATE_PROMPT = (
     "translation of the words above — no commentary, no answers, no "
     "opinions. If they already spoke English, restate their words in "
     "clear English."
+)
+
+TEXT_TRANSLATE_PROMPT = (
+    "Translate the user's written text into English. Output ONLY the "
+    "English translation — no commentary, answers, or opinions. If it is "
+    "already English, restate it in clear English."
+)
+
+TEXT_RESPOND_PROMPT = (
+    "Respond directly to the user's written message in one to four short, "
+    "natural sentences.{camera}"
 )
 
 # Modes whose audio turns replace the standard respond/flush instruction
@@ -376,6 +384,10 @@ async def websocket_endpoint(ws: WebSocket):
         return text
 
     history: list = [{"role": "system", "content": system_prompt(persona)}]
+    # Keep a typed user message even when the provider fails. The request ID
+    # makes an explicit retry reuse that same history entry instead of
+    # appending duplicate user text.
+    text_turn_inputs: dict[str, dict] = {}
     mode = MODES["conversation"]
 
     interrupted = asyncio.Event()
@@ -765,6 +777,52 @@ async def websocket_endpoint(ws: WebSocket):
                                          "id": msg["id"], "cancelled": True})
                 continue
 
+            is_text_turn = msg.get("type") == "text_turn"
+            if is_text_turn:
+                request_id = msg.get("request_id")
+                text = msg.get("text")
+                if (not isinstance(request_id, str) or not request_id
+                        or len(request_id) > 128
+                        or not isinstance(text, str) or not text.strip()):
+                    await send_json(ws, {
+                        "type": "turn_error",
+                        "request_id": request_id if isinstance(request_id, str) else None,
+                        "message": "No se pudo enviar el mensaje / Message could not be sent.",
+                    })
+                    continue
+                existing = text_turn_inputs.get(request_id)
+                if existing and existing["completed"]:
+                    await send_json(ws, {
+                        "type": "turn_error", "request_id": request_id,
+                        "message": "Este mensaje ya fue procesado / This message was already processed.",
+                    })
+                    continue
+                msg["text"] = text
+                image = msg.get("image")
+                if not isinstance(image, str) or len(image) > 2_000_000:
+                    image = None
+                msg["image"] = image
+                # Translation is an explicit per-message choice, available
+                # from the composer when translate mode is active. Preserve
+                # the payload on retry even if a reconnect reset the mode.
+                response_style = (existing["response_style"] if existing
+                                  else msg.get("response_style"))
+                if (not isinstance(response_style, str)
+                        or response_style not in {"translate", "chat"}):
+                    response_style = "translate" if mode.name == "translate" else "chat"
+                msg["response_style"] = response_style
+                msg["speak"] = (existing["speak"] if existing else
+                                msg.get("speak", True) is True)
+                if existing and (existing["text"] != text
+                                 or existing["response_style"] != msg["response_style"]
+                                 or existing["speak"] != msg["speak"]
+                                 or existing["image"] != msg.get("image")):
+                    await send_json(ws, {
+                        "type": "turn_error", "request_id": request_id,
+                        "message": "El ID ya pertenece a otro mensaje / Request ID belongs to another message.",
+                    })
+                    continue
+
             if msg.get("type") == "frame":
                 if msg.get("image") and mode.wants_camera:
                     frame_image = msg["image"]
@@ -780,11 +838,15 @@ async def websocket_endpoint(ws: WebSocket):
                 continue
 
             interrupted.clear()
+            text_turn_completed = False
             audio_b64s = held_audio + (speech_chunks if msg.get("chunked") else [])
             speech_chunks = []
             if valid_audio(msg.get("audio")):
                 audio_b64s.append(msg["audio"])
-            image = (msg.get("image") or frame_image) if mode.wants_camera else None
+            if is_text_turn:
+                image = msg.get("image")
+            else:
+                image = (msg.get("image") or frame_image) if mode.wants_camera else None
             has_audio = bool(audio_b64s)
             is_flush = msg.get("type") == "flush"
 
@@ -794,9 +856,9 @@ async def websocket_endpoint(ws: WebSocket):
                 drain_ready()  # the floor is provably free here
                 continue
 
-            # From here on any failure (malformed WAV included — valid_audio
-            # only checks length) must release the client, not kill the
-            # session loop.
+            # From here on a turn failure (malformed WAV included —
+            # valid_audio only checks length) must release/report to the
+            # client, not kill the session loop.
             p_complete = None  # smart-turn probability, surfaced in the UI
             try:
                 # The audio classifier judges completeness before the LLM is
@@ -915,7 +977,13 @@ async def websocket_endpoint(ws: WebSocket):
                     last_activity["t"] = time.time()
                     continue
 
-                if pre_decided and decision.mode:
+                if is_text_turn:
+                    if msg["response_style"] == "translate":
+                        instruction = TEXT_TRANSLATE_PROMPT
+                    else:
+                        camera = CAMERA_CLAUSE if image else ""
+                        instruction = TEXT_RESPOND_PROMPT.format(camera=camera)
+                elif pre_decided and decision.mode:
                     # Addressed to the assistant (an exit command): answer
                     # it as a normal conversation turn, not as content.
                     instruction = RESPOND_PROMPT.format(camera="")
@@ -940,37 +1008,89 @@ async def websocket_endpoint(ws: WebSocket):
                     fallback = AUDIO_FALLBACK
                 else:
                     fallback = None
-                user_msg = {"role": "user", "content": content + [text_part(instruction)]}
+                if is_text_turn:
+                    if request_id in text_turn_inputs:
+                        user_msg = text_turn_inputs[request_id]["user_msg"]
+                        if not any(item is user_msg for item in history):
+                            history.append(user_msg)
+                    else:
+                        user_msg = {
+                            "role": "user",
+                            "content": ([image_part(image)] if image else [])
+                                       + [text_part(msg["text"]), text_part(instruction)],
+                        }
+                        history.append(user_msg)
+                        text_turn_inputs[request_id] = {
+                            "user_msg": user_msg,
+                            "text": msg["text"],
+                            "response_style": msg["response_style"],
+                            "speak": msg["speak"],
+                            "image": msg.get("image"),
+                            "completed": False,
+                        }
+                    turn_messages = history.copy()
+                else:
+                    user_msg = {"role": "user", "content": content + [text_part(instruction)]}
+                    turn_messages = history + [user_msg]
                 raw_text, pt, no_speech, spoke = await run_turn(
-                    ws, history + [user_msg], interrupted, active,
+                    ws, turn_messages, interrupted, active,
                     tts_backend, expect_transcript=False,
                     p_complete=p_complete,
                     tts_voice=persona.voice or mode.tts_voice,
                     tts_instructions=persona.tts_instructions,
-                    fallback=fallback, instruction=instruction)
+                    fallback=fallback,
+                    # Typed messages have no synthetic transcript line to
+                    # guard; comparing a legitimate written answer (e.g.
+                    # an exact translation) to its prompt can suppress it.
+                    instruction="" if is_text_turn else instruction,
+                    tts_enabled=msg["speak"] if is_text_turn else True,
+                    request_id=msg["request_id"] if is_text_turn else None)
+                if is_text_turn:
+                    text_turn_completed = True
+                    text_turn_inputs[request_id]["completed"] = True
                 if pt:
                     prompt_tokens["last"] = pt
                 if spoke:
                     playing_since["t"] = time.time()  # reply now playing client-side
-                if not pre_decided and not no_speech and not interrupted.is_set() \
-                        and (has_audio or msg.get("text")):
+                if (not pre_decided and not no_speech and not interrupted.is_set()
+                        and not (is_text_turn
+                                 and msg["response_style"] == "translate")
+                        and (has_audio or msg.get("text"))
+                        and bool(raw_text.strip())):
+                    action_messages = (
+                        history + [{"role": "assistant", "content": raw_text}]
+                        if is_text_turn else
+                        history + [user_msg, {"role": "assistant", "content": raw_text}]
+                    )
                     decision = await asyncio.get_event_loop().run_in_executor(
                         None, actions.decide_after,
-                        history + [user_msg,
-                                   {"role": "assistant", "content": raw_text}],
-                        mode.name)
+                        action_messages, mode.name)
                 if no_speech or interrupted.is_set():
                     # No user words stand behind this turn, or the user
                     # cut it off: nothing may act.
                     decision = actions.NONE
                 await apply_decision(decision)
-                remember(user_msg, raw_text, no_speech)
+                if is_text_turn:
+                    # The user entry was committed before generation. Keep
+                    # it even if the model returned no text; add only the
+                    # assistant side when a response exists.
+                    if raw_text.strip() and not no_speech:
+                        history.append({"role": "assistant", "content": raw_text})
+                else:
+                    remember(user_msg, raw_text, no_speech)
                 last_activity["t"] = time.time()
             except DISCONNECT_ERRORS:
                 raise
             except Exception:
                 traceback.print_exc()  # keep the session alive
-                await release_client(ws)
+                if is_text_turn and not text_turn_completed:
+                    await send_json(ws, {
+                        "type": "turn_error",
+                        "request_id": msg.get("request_id"),
+                        "message": "No se pudo procesar el mensaje / Message could not be processed.",
+                    })
+                else:
+                    await release_client(ws)
 
             # A result that finished while the floor was busy delivers now.
             drain_ready()
