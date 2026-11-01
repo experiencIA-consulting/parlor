@@ -1,6 +1,6 @@
 """The streaming turn pipeline: message-content helpers, the incremental
-response/transcript parser, and run_turn (decode → sentences → TTS, all
-pipelined), plus speculative cache priming."""
+response/transcript parser, and run_turn (decode → sentences → optional TTS,
+all pipelined)."""
 
 import asyncio
 import base64
@@ -12,7 +12,7 @@ import wave
 
 import numpy as np
 
-from parlor import llama
+from parlor import cloud
 
 # Parsed tolerantly ("### TRANSCRIPT : ..." happens) — but the colon is
 # REQUIRED and only [ \t] may follow: this regex runs against a partially
@@ -23,14 +23,11 @@ TRANSCRIPT_TAG_RE = re.compile(r"#{2,}[ \t]*TRANSCRIPT[ \t]*:[ \t]*", re.IGNOREC
 SENTENCE_END_RE = re.compile(r"[.!?]+\s")
 MAX_OUTPUT_TOKENS = 256
 
-# Appended (inside the final WAV) before the LLM sees the utterance: audio
-# that stops abruptly at the VAD cutoff makes the encoder hallucinate a
-# confident completion of the last word; a beat of silence fixes it.
+# Appended (inside the merged WAV) before the STT sees the utterance:
+# audio that stops abruptly at the VAD cutoff makes a transcriber invent
+# a confident completion of the last word; a beat of silence fixes it.
 TAIL_SILENCE_S = 0.3
 
-# Rough per-part token costs for the context-rotation estimate.
-AUDIO_TOKENS_PER_SEC = 32
-IMAGE_TOKENS = 300
 
 _DONE = object()
 
@@ -41,29 +38,45 @@ def image_part(b64: str) -> dict:
     return {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}
 
 
-def audio_part(b64: str) -> dict:
-    return {"type": "input_audio", "input_audio": {"data": b64, "format": "wav"}}
-
-
 def text_part(text: str) -> dict:
     return {"type": "text", "text": text}
 
 
 def valid_audio(b64: str | None) -> bool:
-    """At least ~100ms of 16kHz s16 WAV — llama-server 400s on empty audio,
-    and one bad message in history would poison every later request."""
+    """At least ~100ms of 16kHz s16 WAV."""
     return bool(b64) and len(b64) * 3 // 4 > 44 + 3200
 
 
-def user_content(image_b64: str | None, audio_b64s: list[str]) -> list:
-    """Media parts of the current user turn, in canonical (cache-stable)
-    order: image first, then audio segments oldest-to-newest."""
-    parts = [image_part(image_b64)] if image_b64 else []
-    parts += [audio_part(b) for b in audio_b64s]
-    return parts
+def merge_wavs(b64s: list[str]) -> bytes | None:
+    """Concatenate the turn's 16kHz s16 mono WAV segments (raw) into one
+    WAV for transcription, with a beat of tail silence appended: audio
+    that stops abruptly at the VAD cutoff makes the transcriber invent a
+    confident completion of the last word. Returns None when no segment
+    is decodable."""
+    params = None
+    frames = []
+    for b64 in b64s:
+        try:
+            with wave.open(io.BytesIO(base64.b64decode(b64)), "rb") as w:
+                params = params or w.getparams()
+                frames.append(w.readframes(w.getnframes()))
+        except (wave.Error, EOFError, OSError):
+            continue
+    if not params:
+        return None
+    frames.append(b"\x00" * (params.sampwidth * params.nchannels
+                             * int(TAIL_SILENCE_S * params.framerate)))
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as out:
+        out.setparams(params)
+        for f in frames:
+            out.writeframes(f)
+    return buf.getvalue()
 
 
 def estimate_tokens(messages: list) -> int:
+    """Rough token estimate for history rotation (text parts and image
+    parts; only the relative drift matters)."""
     total = 0
     for m in messages:
         content = m.get("content")
@@ -73,11 +86,8 @@ def estimate_tokens(messages: list) -> int:
         for p in content:
             if p["type"] == "text":
                 total += len(p["text"]) // 4
-            elif p["type"] == "input_audio":
-                wav_bytes = len(p["input_audio"]["data"]) * 3 // 4
-                total += (wav_bytes // 32000) * AUDIO_TOKENS_PER_SEC  # 16kHz s16
             else:
-                total += IMAGE_TOKENS
+                total += 1000  # image (voice-detail level)
         total += 8
     return total
 
@@ -115,6 +125,41 @@ async def release_client(ws) -> None:
     sits in 'processing' until its watchdog fires."""
     await send_json(ws, {"type": "turn_final", "transcription": None,
                          "timings": {}, "spoke": False})
+
+
+async def speak_only(ws, line: str, tts_backend, tts_voice: str = "",
+                     tts_instructions: str = "") -> bool:
+    """Speak one canned line without an LLM turn — the fallback for an
+    utterance the transcriber heard no words in. Frames mimic run_turn's
+    outro exactly (turn_final BEFORE audio_end), then report whether
+    anything actually spoke so the caller's floor bookkeeping keys on
+    audio, never text."""
+    loop = asyncio.get_event_loop()
+    try:
+        pcm = await loop.run_in_executor(
+            None, lambda: tts_backend.generate(line, voice=tts_voice,
+                                               instructions=tts_instructions))
+    except Exception as e:
+        print(f"Fallback TTS failed: {e}")
+        await send_json(ws, {"type": "text_delta", "text": line + " "})
+        await send_json(ws, {"type": "turn_final", "transcription": None,
+                             "proactive": False, "timings": {},
+                             "p_complete": None, "spoke": False,
+                             "output": "text", "tts_failed": True})
+        return False
+    pcm_int16 = (pcm * 32767).clip(-32768, 32767).astype(np.int16)
+    await send_json(ws, {"type": "text_delta", "text": line + " "})
+    await send_json(ws, {"type": "audio_start",
+                         "sample_rate": tts_backend.sample_rate})
+    await send_json(ws, {"type": "audio_chunk",
+                         "audio": base64.b64encode(pcm_int16.tobytes()).decode(),
+                         "index": 0})
+    await send_json(ws, {"type": "turn_final", "transcription": None,
+                         "proactive": False, "timings": {},
+                         "p_complete": None, "spoke": True,
+                         "output": "spoken", "tts_failed": False})
+    await send_json(ws, {"type": "audio_end", "tts_time": 0})
+    return True
 
 
 # ── streaming turn parser ─────────────────────────────────────────────────
@@ -261,35 +306,40 @@ def _instruction_text(messages: list) -> str:
 
 
 async def run_turn(ws, messages: list, interrupted: asyncio.Event,
-                   active: dict, tts_backend, expect_transcript: bool = True,
+                   active: dict, tts_backend, expect_transcript: bool = False,
                    p_complete: float | None = None,
-                   tts_voice: str = "af_heart",
+                   tts_voice: str = "",
                    proactive: bool = False,
-                   fallback: str | None = None
+                   fallback: str | None = None,
+                   instruction: str | None = None,
+                   tts_instructions: str = "",
+                   tts_enabled: bool = True,
+                   request_id: str | None = None,
                    ) -> tuple[str, int | None, bool, bool]:
-    """Stream one model turn: decode → sentences → TTS, all pipelined. The
-    transcript line is pushed to the client the moment it completes, while
-    the response is still decoding. Returns the raw generated text, the
-    request's real prompt token count when llama-server reported one
-    (drives history rotation), no_speech — True when the model wrote a
-    transcript line that had to be rejected (a no-speech annotation, or
-    an echo of the instruction): no user words stand behind this turn, so
-    the caller must not store it or act on it (a turn that merely OMITS
-    the transcript marker is not no_speech: real words were heard and
-    answered, only the format slipped) — and spoke: whether any TTS audio
-    was sent; the caller's floor bookkeeping must key on it, not on the
-    text (a transcript-only turn has text but plays nothing).
+    """Stream one model turn: decode → sentences → TTS, all pipelined.
+    Returns the raw generated text, the request's real prompt token count
+    when the endpoint reported one (drives history rotation), no_speech —
+    True when the model wrote a transcript-like no-speech annotation or
+    instruction echo, so no user words stand behind the turn and the
+    caller must not store it or act on it — and spoke: whether any TTS
+    audio was sent; the caller's floor bookkeeping must key on it, not
+    the text (a reply may be text-only or only annotate and play nothing).
+    tts_enabled=False streams response text without making TTS requests;
+    a failed TTS request also preserves the generated text.
 
-    proactive marks a server-initiated turn (delegation delivery): the
-    model's transcript line is its own echo, not the user's words, so no
+    proactive marks a server-initiated turn (delegation delivery): no
     transcript frame is sent and turn_final carries proactive=True — the
-    client must never fill a user bubble from it."""
+    client must never fill a user bubble from it. instruction is the text
+    the instruction-echo guards compare against (the caller's computed
+    per-turn instruction), because echoing off the last message would
+    sweep the user's transcript in — a translation that restates English
+    words would be suppressed as its own echo."""
     loop = asyncio.get_event_loop()
     t0 = time.time()
     timings: dict = {}
 
     chunk_q: asyncio.Queue = asyncio.Queue()
-    stream = llama.ChatStream(messages, MAX_OUTPUT_TOKENS)
+    stream = cloud.ChatStream(messages, MAX_OUTPUT_TOKENS)
     active["stream"] = stream
     raw = {"text": ""}
 
@@ -306,17 +356,26 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
     producer = loop.run_in_executor(None, produce)
 
     sentence_q: asyncio.Queue = asyncio.Queue()
-    audio_state = {"started": False, "first_audio_at": None, "chunks": 0}
+    audio_state = {"started": False, "first_audio_at": None, "chunks": 0,
+                   "tts_failed": False}
 
     async def tts_worker():
         while True:
             sentence = await sentence_q.get()
             if sentence is _DONE:
                 return
-            if interrupted.is_set():
+            if interrupted.is_set() or not tts_enabled or audio_state["tts_failed"]:
                 continue  # keep draining
-            pcm = await loop.run_in_executor(
-                None, lambda s=sentence: tts_backend.generate(s, voice=tts_voice))
+            try:
+                pcm = await loop.run_in_executor(
+                    None, lambda s=sentence: tts_backend.generate(
+                        s, voice=tts_voice, instructions=tts_instructions))
+            except Exception as e:
+                # A TTS outage must not discard a valid text response. Stop
+                # spending on later sentence requests and finish text-only.
+                audio_state["tts_failed"] = True
+                print(f"TTS failed: {e}")
+                continue
             if interrupted.is_set():
                 continue
             if not audio_state["started"]:
@@ -336,7 +395,14 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
     parser = StreamParser(expect_transcript)
     tts_started_at = None
     transcript_sent = False
-    instruction = _instruction_text(messages)
+    # The instruction-echo checks compare against THIS text only. In the
+    # old protocol the instruction was the whole last message; now the
+    # user's transcript rides the same content parts, and comparing a
+    # translation against the words being translated suppresses legitimate
+    # speech (an English→English restate IS the user's words verbatim —
+    # live: mid-translate turns lost every echo and fell back to silence).
+    if instruction is None:
+        instruction = _instruction_text(messages)
 
     def clean_transcript(text: str | None) -> str | None:
         """The client shows this as the user's words — never instruction
@@ -380,10 +446,14 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
             if NO_SPEECH_RE.match(sentence):
                 print(f"Sentence suppressed (annotation): {sentence!r}")
                 continue
-            if tts_started_at is None:
+            if tts_enabled and tts_started_at is None:
                 tts_started_at = time.time()
-            await send_json(ws, {"type": "text_delta", "text": sentence + " "})
-            sentence_q.put_nowait(sentence)
+            delta = {"type": "text_delta", "text": sentence + " "}
+            if request_id is not None:
+                delta["request_id"] = request_id
+            await send_json(ws, delta)
+            if tts_enabled:
+                sentence_q.put_nowait(sentence)
 
     try:
         while True:
@@ -453,6 +523,9 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
         "timings": timings,
         "p_complete": p_complete,
         "spoke": audio_state["started"],  # False → client must not wait for audio_end
+        "output": "spoken" if audio_state["started"] else "text",
+        "tts_failed": audio_state["tts_failed"],
+        **({"request_id": request_id} if request_id is not None else {}),
     })
     if audio_state["started"]:
         await send_json(ws, {"type": "audio_end",
@@ -462,15 +535,9 @@ async def run_turn(ws, messages: list, interrupted: asyncio.Event,
 
 
 async def prime_cache(messages: list) -> None:
-    """Fire-and-discard request that pushes a prompt prefix (camera frame,
-    speech chunks) through llama-server's cache while the user is talking.
-    Content must be media-only appends — a trailing text block would diverge
-    the prefix and kill reuse. Failure is not worth reporting: the turn still
-    works, it just pays full prefill."""
-    t0 = time.time()
-    try:
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: llama.chat_blocking(messages, max_tokens=1))
-        print(f"Primed cache ({time.time() - t0:.2f}s)")
-    except Exception as e:
-        print(f"Cache priming failed: {e}")
+    """Legacy hook. The local stack warmed llama-server's prefix cache
+    with the user's speech mid-utterance; a cloud endpoint charges every
+    request in full and the utterance is now transcribed per-turn, so
+    priming has no effect. Kept as a no-op so call sites (and
+    benchmarks) don't have to branch."""
+    return None

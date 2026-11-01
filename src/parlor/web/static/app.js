@@ -1,16 +1,41 @@
 const $ = id => document.getElementById(id);
 const video = $('video'), cameraToggle = $('cameraToggle');
+const micToggle = $('micToggle');
 const messagesDiv = $('messages'), statusEl = $('status');
+const textForm = $('textForm'), textInput = $('textInput'), textSend = $('textSend');
+const speakReply = $('speakReply'), textActionWrap = $('textActionWrap');
+const textAction = $('textAction'), textFormStatus = $('textFormStatus');
 const stateDot = $('stateDot'), stateText = $('stateText');
 const viewportWrap = $('viewportWrap');
+const cameraPreview = $('cameraPreview');
 const waveformCanvas = $('waveform');
 const waveformCtx = waveformCanvas.getContext('2d');
+let followLatestMessage = true;
+
+messagesDiv.addEventListener('scroll', () => {
+  const remaining = messagesDiv.scrollHeight - messagesDiv.clientHeight - messagesDiv.scrollTop;
+  followLatestMessage = remaining < 32;
+});
+
+function scrollMessagesToLatest(force = false) {
+  if (force) followLatestMessage = true;
+  if (followLatestMessage) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
 
 let ws, mediaStream, myvad;
-let cameraEnabled = true;
+// The camera is OPT-IN (token economy, cloud era): every eyes-on turn pays
+// ~1k image tokens on the chat endpoint, and a stale prefetched frame
+// silently charges the next turn too. The user switches it on with the
+// toggle; until then no video track is even acquired, so the browser's
+// camera indicator stays off and no frames ride the session.
+let cameraEnabled = false;
 let audioCtx;
 let state = 'loading';
 let ignoreIncomingAudio = false;
+let sessionMode = 'conversation';
+let activeTextTurnId = null;
+let voiceTurnPending = false;
+const pendingTextTurns = new Map();
 
 // Streaming audio playback state
 let streamSampleRate = 24000;
@@ -134,6 +159,7 @@ function setState(newState) {
   if (myvad) {
     myvad.setOptions({ positiveSpeechThreshold: newState === 'speaking' ? 0.92 : 0.5 });
   }
+  updateTextComposer();
 
   if (newState === 'listening' && mediaStream && audioCtx && analyser) {
     if (!micSource) {
@@ -183,25 +209,38 @@ function connect() {
   ws.onopen = () => {
     setStatus('connected', 'Connected');
     if (state !== 'loading') setState('listening');
+    updateTextComposer();
+    // A fresh WS session starts neutral on the server: re-apply the
+    // remembered persona so reload keeps the same voice/character.
+    if (personaKey && personaKey !== 'neutral') {
+      wsSend({ type: 'set_personality', key: personaKey });
+    }
   };
   ws.onclose = () => {
     // A reconnect gets a brand-new server conversation — reset per-turn state.
     framePrefetched = false;
     serverHoldingAudio = false;
+    voiceTurnPending = false;
     removePendingUserBubble();
     delegationChips.forEach(chip => chip.remove());  // tasks died with the server
     delegationChips.clear();
     clearTimerChips();  // timers died with it too
     setSessionMode('conversation');  // a reconnect starts a fresh session
     clearFlushTimer();
+    for (const [id, turn] of pendingTextTurns) {
+      setTextTurnStatus(turn.bubble,
+        'Conexión perdida / Connection lost', true, () => retryTextTurn(id));
+    }
+    activeTextTurnId = null;
     setStatus('disconnected', 'Disconnected');
+    updateTextComposer();
     setTimeout(connect, 2000);
   };
   ws.onmessage = ({ data }) => {
     const msg = JSON.parse(data);
     if (msg.type === 'text_delta') {
       if (ignoreIncomingAudio) return;
-      appendAssistantText(msg.text);
+      appendAssistantText(msg.text, msg.request_id);
     } else if (msg.type === 'turn_incomplete') {
       // The classifier judged the user unfinished — keep listening; if they
       // stay silent, flush the held audio so the model answers anyway.
@@ -214,6 +253,7 @@ function connect() {
         `sounds unfinished (${Math.round((msg.p_complete ?? 0) * 100)}%) — still listening`);
       goListening();
       startFlushTimer();
+      updateTextComposer();
     } else if (msg.type === 'transcript') {
       // The transcript line leads the model's reply, so what you said
       // appears while the response is still decoding.
@@ -221,20 +261,37 @@ function connect() {
       fillUserBubble(msg.transcription);
     } else if (msg.type === 'turn_final') {
       if (ignoreIncomingAudio) return;
+      if (!msg.request_id && !msg.proactive) voiceTurnPending = false;
       if (msg.proactive) {
         // Server-initiated delivery: its "transcript" is the model's own
         // echo, and there is no pending user bubble to fill or remove.
-      } else if (!msg.spoke && !msg.transcription) {
+      } else if (!(msg.spoke || msg.transcription)) {
         removePendingUserBubble();  // glitch/empty turn — nothing was heard
-      } else {
+      } else if (msg.transcription) {
+        // A spoken turn normally carries no transcript line now (the
+        // words rode the earlier 'transcript' frame): never clobber that
+        // bubble with '…'.
         fillUserBubble(msg.transcription);
       }
       const t = msg.timings || {};
-      if (t.llm_time) {
-        setAssistantMeta((t.ttfa_s ? `first audio ${t.ttfa_s}s · ` : '') + `model ${t.llm_time}s`);
+      const assistantMeta = [];
+      if (t.ttfa_s) assistantMeta.push(`first audio ${t.ttfa_s}s`);
+      if (t.llm_time) assistantMeta.push(`model ${t.llm_time}s`);
+      if (msg.tts_failed) assistantMeta.push('TTS no disponible / TTS unavailable');
+      if (assistantMeta.length) setAssistantMeta(assistantMeta.join(' · '));
+      if (currentAssistantEl) {
+        setMessageChannel(currentAssistantEl,
+          msg.spoke ? '🔊' : '📝',
+          msg.spoke
+            ? 'Respuesta hablada / Spoken reply'
+            : 'Respuesta escrita / Text reply');
       }
+      if (msg.request_id) finishTextTurn(msg.request_id);
       currentAssistantEl = null;  // the next turn gets its own bubble
       if (!msg.spoke) goListening();  // no audio will follow
+    } else if (msg.type === 'turn_error') {
+      failTextTurn(msg.request_id, msg.message ||
+        'No se pudo procesar / Could not process message');
     } else if (msg.type === 'audio_start') {
       if (ignoreIncomingAudio) return;
       streamSampleRate = msg.sample_rate || 24000;
@@ -253,6 +310,22 @@ function connect() {
       if (meta) meta.textContent += ` · tts ${msg.tts_time}s`;
     } else if (msg.type === 'mode_changed') {
       setSessionMode(msg.mode);
+    } else if (msg.type === 'personality_changed') {
+      personaKey = msg.key;
+      localStorage.setItem(PERSONA_STORE_KEY, personaKey);
+      setPersonaChip(msg.label, msg.key !== 'neutral');
+      renderPersonaPanel();
+    } else if (msg.type === 'voice_preview_start') {
+      // Reuses the streamed-playback machine (setState('speaking') raises
+      // the VAD threshold; onended → goListening restores everything).
+      streamSampleRate = msg.sample_rate || 24000;
+      startStreamPlayback();
+    } else if (msg.type === 'voice_preview_chunk') {
+      queueAudioChunk(msg.audio);
+    } else if (msg.type === 'voice_preview_end') {
+      // Playback already drained → restore now; otherwise the last
+      // source's onended does it via goListening().
+      if (!streamSources.length) goListening();
     } else if (msg.type === 'delegation_started') {
       addDelegationChip(msg.id, msg.task);
     } else if (msg.type === 'delegation_parked') {
@@ -289,16 +362,19 @@ const LOADING_DOTS = '<span class="loading-dots"><span></span><span></span><span
 let currentAssistantEl = null;
 let currentAssistantBodyEl = null;
 
-function appendAssistantText(text) {
+function appendAssistantText(text, requestId = null) {
   if (!currentAssistantEl) {
     currentAssistantEl = document.createElement('div');
     currentAssistantEl.className = 'msg assistant';
-    currentAssistantEl.innerHTML = '<span class="body"></span>';
+    const body = document.createElement('span');
+    body.className = 'body';
+    currentAssistantEl.appendChild(body);
     currentAssistantBodyEl = currentAssistantEl.querySelector('.body');
     messagesDiv.appendChild(currentAssistantEl);
   }
+  if (requestId) currentAssistantEl.dataset.requestId = requestId;
   currentAssistantBodyEl.textContent += text;
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  scrollMessagesToLatest();
 }
 
 function setAssistantMeta(text) {
@@ -315,10 +391,223 @@ function setAssistantMeta(text) {
 // ── Session mode (server-driven; the chip's stop button is the escape
 // hatch for when the spoken exit command gets misheard) ──
 const MODE_LABELS = { translate: 'Translating → English', listen: 'Just listening' };
-
 function setSessionMode(mode) {
+  sessionMode = mode;
   $('modeChip').hidden = mode === 'conversation';
   $('modeLabel').textContent = MODE_LABELS[mode] || mode;
+  textActionWrap.hidden = mode !== 'translate';
+  updateTextComposer();
+}
+
+function textComposerLocked() {
+  return !wsOpen() || state !== 'listening' || speechActive ||
+    voiceTurnPending || serverHoldingAudio || Boolean(flushTimer) ||
+    activeTextTurnId !== null;
+}
+
+function updateTextComposer() {
+  if (!textInput) return;
+  const locked = textComposerLocked();
+  textInput.disabled = locked;
+  textSend.disabled = locked || !textInput.value.trim();
+  speakReply.disabled = locked;
+  textAction.disabled = locked;
+  messagesDiv.querySelectorAll('.retry-btn').forEach((button) => {
+    button.disabled = locked || !wsOpen();
+  });
+  textForm.setAttribute('aria-busy', String(locked));
+  if (!wsOpen()) {
+    textFormStatus.textContent = 'Reconectando / Reconnecting…';
+  } else if (speechActive || voiceTurnPending || serverHoldingAudio) {
+    textFormStatus.textContent = 'Esperando turno de voz / Waiting for voice turn';
+  } else if (state === 'processing' || state === 'speaking' || activeTextTurnId !== null) {
+    textFormStatus.textContent = 'Asistente ocupado / Assistant is busy';
+  } else {
+    textFormStatus.textContent = '';
+  }
+}
+
+function setTextTurnStatus(bubble, label, retry = false, onRetry = null) {
+  if (!bubble) return;
+  let status = bubble.querySelector('.turn-status');
+  if (!label) {
+    if (status) status.remove();
+    return;
+  }
+  if (!status) {
+    status = document.createElement('div');
+    status.className = 'meta turn-status';
+    bubble.appendChild(status);
+  }
+  status.classList.toggle('sent', !retry);
+  status.textContent = label;
+  if (retry) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'retry-btn';
+    button.textContent = 'Reintentar / Retry';
+    button.setAttribute('aria-label', 'Reintentar mensaje / Retry message');
+    button.disabled = !wsOpen();
+    button.addEventListener('click', onRetry);
+    status.appendChild(button);
+  }
+}
+
+function sendTextTurn(turn) {
+  if (!wsOpen() || textComposerLocked()) return false;
+  activeTextTurnId = turn.payload.request_id;
+  setTextTurnStatus(turn.bubble, 'Enviando / Sending…');
+  currentAssistantEl = null;
+  currentAssistantBodyEl = null;
+  goProcessing();
+  try {
+    ws.send(JSON.stringify(turn.payload));
+  } catch (e) {
+    activeTextTurnId = null;
+    setTextTurnStatus(turn.bubble,
+      'No se pudo enviar / Could not send', true,
+      () => retryTextTurn(turn.payload.request_id));
+    goListening();
+    return false;
+  }
+  updateTextComposer();
+  return true;
+}
+
+function retryTextTurn(requestId) {
+  const turn = pendingTextTurns.get(requestId);
+  if (!turn || !wsOpen() || textComposerLocked()) return;
+  sendTextTurn(turn);
+}
+
+function finishTextTurn(requestId) {
+  const turn = pendingTextTurns.get(requestId);
+  if (!turn) return;
+  pendingTextTurns.delete(requestId);
+  if (activeTextTurnId === requestId) activeTextTurnId = null;
+  setTextTurnStatus(turn.bubble, '');
+  updateTextComposer();
+}
+
+function failTextTurn(requestId, message) {
+  const turn = pendingTextTurns.get(requestId);
+  if (!turn) return;
+  if (activeTextTurnId === requestId) activeTextTurnId = null;
+  setTextTurnStatus(turn.bubble, message, true,
+    () => retryTextTurn(requestId));
+  if (currentAssistantEl?.dataset.requestId === requestId) {
+    if (state === 'speaking') stopPlayback();
+    setMessageChannel(currentAssistantEl,
+      state === 'speaking' ? '🔊' : '📝',
+      state === 'speaking'
+        ? 'Respuesta parcialmente hablada / Partially spoken reply'
+        : 'Respuesta parcial escrita / Partial text reply');
+    currentAssistantEl = null;
+    currentAssistantBodyEl = null;
+  }
+  goListening();
+  updateTextComposer();
+}
+
+function submitTextTurn(event) {
+  event.preventDefault();
+  const text = textInput.value;
+  if (!text.trim() || textComposerLocked()) return;
+  const requestId = globalThis.crypto?.randomUUID?.()
+    || `text-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const payload = {
+    type: 'text_turn',
+    request_id: requestId,
+    text,
+    speak_reply: speakReply.checked,
+    speak: speakReply.checked, // Compatibility with a server process using the previous field.
+    response_style: sessionMode === 'translate' ? textAction.value : 'chat',
+  };
+  const image = captureFrame();
+  if (image) payload.image = image;
+
+  const bubble = addMessage('user', text, image ? 'with camera' : '');
+  bubble.dataset.base = image ? 'with camera' : '';
+  setMessageChannel(bubble, '⌨️', 'Entrada por texto / Typed input');
+  const turn = { payload, bubble };
+  pendingTextTurns.set(requestId, turn);
+  textInput.value = '';
+  updateTextComposer();
+  sendTextTurn(turn);
+}
+
+// ── Personality selector: curated presets from the server (/personas).
+// A preset bundles voice + speech delivery + chat persona; switching sends
+// set_personality and the server rewrites its system message for FUTURE
+// turns. The choice persists in localStorage and re-applies on connect.
+const PERSONA_STORE_KEY = 'parlor-persona';
+let personaCatalog = [];   // [{key,label,description}] from /personas
+let personaKey = localStorage.getItem(PERSONA_STORE_KEY) || 'neutral';
+
+const personaChip = $('personaChip'), personaPanel = $('personaPanel');
+
+function renderPersonaPanel() {
+  personaPanel.innerHTML = '';
+  for (const p of personaCatalog) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'persona-item' + (p.key === personaKey ? ' selected' : '');
+    item.innerHTML = `<span class="p-label"></span><button class="p-preview" title="Sample">▶</button><span class="p-desc"></span>`;
+    item.querySelector('.p-label').textContent = p.label;
+    item.querySelector('.p-desc').textContent = p.description;
+    item.addEventListener('click', (e) => {
+      if (e.target.classList.contains('p-preview')) return;
+      selectPersona(p.key);
+    });
+    item.querySelector('.p-preview').addEventListener('click', () => {
+      if (state === 'listening' || state === 'processing') wsSend({ type: 'voice_preview', key: p.key });
+    });
+    personaPanel.appendChild(item);
+  }
+}
+
+function setPersonaChip(label, selected = true) {
+  personaChip.textContent = label;
+  personaChip.classList.toggle('active', selected);
+}
+
+function selectPersona(key) {
+  personaKey = key;
+  localStorage.setItem(PERSONA_STORE_KEY, key);
+  wsSend({ type: 'set_personality', key });
+  personaPanel.hidden = true;
+}
+
+personaChip.addEventListener('click', () => {
+  personaPanel.hidden = !personaPanel.hidden;
+  if (!personaPanel.hidden) renderPersonaPanel();
+});
+document.addEventListener('click', (e) => {
+  // click-outside close (the chip's own handler re-toggles it)
+  if (!personaPanel.hidden && !personaChip.contains(e.target)
+      && !personaPanel.contains(e.target) && !e.target.closest('.persona-item')) {
+    personaPanel.hidden = true;
+  }
+});
+
+// Preview playback: reuses the audio pipeline's chunk decoder, but the
+// frames are voice_preview_* — they must never touch the transcript or
+// the turn machine. While the sample plays, the VAD threshold rises (the
+// mic would otherwise hear the sample) and any incoming turn frames are
+// ignored (a delivery LEADING the sample would still play — the preview
+// is only issued from idle anyway).
+async function loadPersonas() {
+  try {
+    personaCatalog = await (await fetch('/personas')).json();
+  } catch (e) {
+    console.warn('personas catalog failed to load:', e.message);
+    personaCatalog = [{ key: 'neutral', label: 'Neutral', description: 'default assistant' }];
+  }
+  const known = personaCatalog.some(p => p.key === personaKey);
+  if (!known) personaKey = 'neutral';
+  setPersonaChip(personaCatalog.find(p => p.key === personaKey)?.label || 'Neutral',
+                 personaKey !== 'neutral');
+  renderPersonaPanel();
 }
 
 // ── Delegation chips: a background research task in flight, shown until
@@ -331,7 +620,7 @@ function addDelegationChip(id, task) {
   div.innerHTML = `${LOADING_DOTS}<span class="task"></span>`;
   div.querySelector('.task').textContent = task;
   messagesDiv.appendChild(div);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  scrollMessagesToLatest();
   delegationChips.set(id, div);
 }
 
@@ -354,7 +643,7 @@ function addTimerChip(id, label, seconds) {
   div.querySelector('.task').textContent = label;
   div.querySelector('.timer-cancel').onclick = () => wsSend({ type: 'cancel_timer', id });
   messagesDiv.appendChild(div);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  scrollMessagesToLatest();
   timerChips.set(id, { el: div, deadline: Date.now() + seconds * 1000 });
   if (!timerTicker) timerTicker = setInterval(tickTimers, 500);
   tickTimers();
@@ -399,7 +688,10 @@ function removePendingUserBubble() {
 // meta ('with camera') is kept in dataset so later info can extend it.
 function addUserLoadingBubble(meta = '') {
   if (pendingUserBubble()) return;
-  addMessage('user', LOADING_DOTS, meta).dataset.base = meta;
+  const bubble = addMessage('user', '', meta);
+  bubble.dataset.base = meta;
+  bubble.querySelector('.body').innerHTML = LOADING_DOTS;
+  setMessageChannel(bubble, '🎙️', 'Entrada por voz / Voice input');
 }
 
 function setBubbleMeta(bubble, extra) {
@@ -420,8 +712,22 @@ function setBubbleMeta(bubble, extra) {
 function fillUserBubble(transcription) {
   const bubble = pendingUserBubble();
   if (!bubble) return;
-  bubble.textContent = transcription || '…';
+  bubble.querySelector('.body').textContent = transcription || '…';
   setBubbleMeta(bubble, '');
+}
+
+function setMessageChannel(bubble, emoji, label) {
+  if (!bubble) return;
+  let badge = bubble.querySelector('.channel-badge');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'channel-badge';
+    badge.setAttribute('role', 'img');
+    bubble.appendChild(badge);
+  }
+  badge.textContent = emoji;
+  badge.setAttribute('aria-label', label);
+  badge.title = label;
 }
 
 // ── Flush timer: an incomplete turn went quiet — have the model answer the
@@ -461,22 +767,54 @@ const VIDEO_CONSTRAINTS = { width: 640, height: 480, facingMode: 'user' };
 const AUDIO_CONSTRAINTS = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 
 async function startCamera() {
+  // Mic only: video is acquired later, when the user opts in (enableCamera).
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: VIDEO_CONSTRAINTS, audio: AUDIO_CONSTRAINTS,
-    });
-    video.srcObject = mediaStream;
-    return;
-  } catch (e) { console.warn('Video+audio failed:', e.message); }
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS });
+  } catch (e) {
+    console.warn('Mic failed:', e.message);
+    mediaStream = new MediaStream();
+  }
+  if (!mediaStream.getAudioTracks().length) {
+    console.warn('no mic — voice turns and VAD will not work');
+  }
+}
 
-  const streams = await Promise.allSettled([
-    navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS }),
-    navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS }),
-  ]);
-  mediaStream = new MediaStream();
-  streams.forEach(r => { if (r.status === 'fulfilled') r.value.getTracks().forEach(t => mediaStream.addTrack(t)); });
-  if (mediaStream.getVideoTracks().length) video.srcObject = mediaStream;
-  if (!mediaStream.getAudioTracks().length) { cameraEnabled = false; }
+function setCameraUI() {
+  cameraToggle.classList.toggle('active', cameraEnabled);
+  cameraToggle.textContent = cameraEnabled ? 'Camera On' : 'Camera Off';
+  video.style.opacity = cameraEnabled ? 1 : 0.3;
+  cameraPreview.classList.toggle('is-open', cameraEnabled);
+  cameraPreview.classList.toggle('is-collapsed', !cameraEnabled);
+  cameraPreview.setAttribute('aria-hidden', String(!cameraEnabled));
+  cameraPreview.inert = !cameraEnabled;
+}
+
+// Acquire the video track on demand (must run inside the click's user
+// gesture — Chrome requires one for getUserMedia, and we want the light
+// to come on exactly when the toggle flips).
+async function enableCamera() {
+  if (cameraEnabled) return;
+  try {
+    let [track] = mediaStream.getVideoTracks();
+    if (!track) {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS });
+      [track] = stream.getVideoTracks();
+      mediaStream.addTrack(track);
+    }
+    video.srcObject = mediaStream;
+    cameraEnabled = true;
+    setCameraUI();
+  } catch (e) {
+    console.warn('Camera enable failed:', e.message);
+    cameraEnabled = false;
+    setCameraUI();
+  }
+}
+
+function disableCamera() {
+  cameraEnabled = false;
+  for (const t of mediaStream.getVideoTracks()) t.stop();
+  setCameraUI();
 }
 
 function captureFrame() {
@@ -515,6 +853,8 @@ const BARGE_SPEECH_P = 0.85;
 let bargeWindow = []; // 1/0 per recent frame, while TTS plays
 
 function handleVadFrame(probs, frame) {
+  if (micMuted) return;  // the muted track feeds silence anyway — nothing
+                         // must ever reach a send path while muted
   if (state === 'speaking') {
     bargeWindow.push(probs && probs.isSpeech > BARGE_SPEECH_P ? 1 : 0);
     if (bargeWindow.length > BARGE_WINDOW) bargeWindow.shift();
@@ -582,6 +922,7 @@ function startUtteranceCapture() {
   uttFrames = [...preFrames];
   uttSamplesSent = 0;
   chunkSeq = 0;
+  updateTextComposer();
 }
 
 // Send the camera frame the moment speech STARTS: the server prefills the
@@ -597,6 +938,8 @@ function prefetchFrame() {
 
 function handleSpeechStart() {
   clearFlushTimer();
+  if (micMuted) return;  // should be unreachable (track feeds silence) —
+                         // a VAD edge must never capture pre-mute audio
   if (state === 'listening') { prefetchFrame(); startUtteranceCapture(); }
   // Barge-in while speaking is handled frame-by-frame in handleVadFrame,
   // which requires sustained speech — a single VAD trigger is too often echo.
@@ -619,6 +962,13 @@ function triggerBargeIn() {
 function handleSpeechEnd(audio) {
   const wasStreaming = speechActive && uttSamplesSent > 0;
   speechActive = false; // always reset — a leak here streams mic audio forever
+  updateTextComposer();
+  if (micMuted) {
+    // A segment leaked in despite the mute (VAD edge / race): never send it.
+    uttFrames = []; uttSamplesSent = 0; framePrefetched = false;
+    if (state === 'listening') goListening();
+    return;
+  }
   if (state !== 'listening' || !wsOpen()) {
     // Utterance dropped (e.g. it ended while the assistant was speaking):
     // its prefetched frame is stale now — the next utterance sends a fresh one.
@@ -633,6 +983,7 @@ function handleSpeechEnd(audio) {
   const withCamera = framePrefetched || !!imageBase64;
   framePrefetched = false;
 
+  voiceTurnPending = true;
   goProcessing();
   addUserLoadingBubble(withCamera ? 'with camera' : '');
   setBubbleMeta(pendingUserBubble(), '');  // hold resolved — drop its meta
@@ -652,6 +1003,56 @@ function handleSpeechEnd(audio) {
   if (imageBase64) payload.image = imageBase64;
   wsSend(payload);
 }
+
+// ── Mic mute (privacy) ──
+// The audio track is disabled in place (enabled=false): every frame it now
+// produces is silence, so the VAD never opens a speech segment and nothing
+// leaves the client — no request or re-permission is needed to unmute, and
+// the analyser/waveform go flat by themselves. In-flight state is discarded
+// locally, BUT audio already sent (streamed chunks of the running
+// utterance, the turn's tail, segments the server holds mid-hold) is
+// already in the server session — muting proves against FUTURE speech, not
+// frames already across the wire.
+let micMuted = false;
+
+function setMicUI() {
+  micToggle.classList.toggle('active', !micMuted);
+  micToggle.textContent = micMuted ? 'Mic Muted' : 'Mic On';
+  if (micMuted && state === 'listening') setStatus('disconnected', 'Mic muted');
+}
+
+function muteMic() {
+  if (micMuted) return;
+  micMuted = true;
+  for (const t of mediaStream.getAudioTracks()) t.enabled = false;
+  // Drop anything half-captured: an utterance that started before the
+  // mute must NOT continue streaming its (pre-mute) frames after un-mute.
+  speechActive = false;
+  uttFrames = [];
+  uttSamplesSent = 0;
+  preFrames = [];
+  phantomQuiet = 0;
+  bargeWindow = [];
+  framePrefetched = false;
+  clearFlushTimer();
+  setMicUI();
+}
+
+function unmuteMic() {
+  if (!micMuted) return;
+  micMuted = false;
+  for (const t of mediaStream.getAudioTracks()) t.enabled = true;
+  setMicUI();
+  // A segment may already have opened while our track was feeding the VAD
+  // silence frames — canonicalize the state machine to a clean idle
+  // (goListening clears pending flags and announces the floor is free, but
+  // do NOT put a 'ready' over a client that may be mid-thought instead).
+  if (state === 'listening' && !speechActive) goListening();
+}
+
+micToggle.addEventListener('click', () => {
+  micMuted ? unmuteMic() : muteMic();
+});
 
 // ── Float32 @ 16kHz → WAV base64 ──
 function float32ToWavBase64(samples) {
@@ -743,9 +1144,18 @@ function queueAudioChunk(base64Pcm) {
 function addMessage(role, text, meta) {
   const div = document.createElement('div');
   div.className = `msg ${role}`;
-  div.innerHTML = `${text}${meta ? `<div class="meta">${meta}</div>` : ''}`;
+  const body = document.createElement('span');
+  body.className = 'body';
+  body.textContent = text;
+  div.appendChild(body);
+  if (meta) {
+    const metaEl = document.createElement('div');
+    metaEl.className = 'meta';
+    metaEl.textContent = meta;
+    div.appendChild(metaEl);
+  }
   messagesDiv.appendChild(div);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  scrollMessagesToLatest(role === 'user');
   return div;
 }
 
@@ -753,11 +1163,18 @@ $('modeStop').addEventListener('click', () => {
   wsSend({ type: 'set_mode', mode: 'conversation' });
 });
 
+textForm.addEventListener('submit', submitTextTurn);
+textInput.addEventListener('input', updateTextComposer);
+textInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    textForm.requestSubmit();
+  }
+});
+
 cameraToggle.addEventListener('click', () => {
-  cameraEnabled = !cameraEnabled;
-  cameraToggle.classList.toggle('active', cameraEnabled);
-  cameraToggle.textContent = cameraEnabled ? 'Camera On' : 'Camera Off';
-  video.style.opacity = cameraEnabled ? 1 : 0.3;
+  // The track is acquired/stopped here, inside a real user gesture.
+  cameraEnabled ? disableCamera() : enableCamera();
 });
 
 // ── Init ──
@@ -765,7 +1182,9 @@ async function init() {
   initWaveformCanvas();
   window.addEventListener('resize', initWaveformCanvas);
 
+  loadPersonas();  // the catalog fills the selector independently of the WS
   await startCamera();
+  setCameraUI();  // camera starts OFF — dim the empty <video> to match
   connect();
 
   myvad = await vad.MicVAD.new({

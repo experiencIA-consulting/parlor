@@ -29,12 +29,16 @@
     font-family: var(--font-body);
     background: var(--c-bg);
     color: var(--c-text);
-    height: 100vh;
+    height: 100vh;   /* fallback for browsers without dvh */
+    height: 100dvh;  /* keep conversation scrolling inside #messages */
     display: flex;
     flex-direction: column;
     align-items: center;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
     position: relative;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
   /* ── Background radial glow ── */
@@ -142,16 +146,49 @@
 
   /* ── Main stack ── */
   .portal-stack {
-    flex: 1;
+    flex: 1 1 0;
     width: 100%;
     max-width: 720px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 20px 8px 16px;
+    /* safe-area: on notch phones the home bar overlays the bottom edge —
+       the controls must sit above it, not under it */
+    padding: 20px 8px calc(16px + env(safe-area-inset-bottom));
     gap: 0;
     z-index: 2;
     min-height: 0;
+  }
+
+  /* ── Collapsible camera preview ── */
+  .camera-preview {
+    display: grid;
+    grid-template-rows: 1fr;
+    width: 100%;
+    max-width: 640px;
+    opacity: 1;
+    transform: translateY(0);
+    visibility: visible;
+    transition: grid-template-rows 0.32s ease, opacity 0.24s ease,
+      transform 0.32s ease, visibility 0s;
+  }
+
+  .camera-preview.is-collapsed {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-8px);
+    visibility: hidden;
+    pointer-events: none;
+    transition: grid-template-rows 0.32s ease, opacity 0.24s ease,
+      transform 0.32s ease, visibility 0s linear 0.32s;
+  }
+
+  .camera-preview-inner {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
   /* ── Webcam viewport ── */
@@ -264,23 +301,31 @@
     max-width: 640px;
     flex: 1;
     min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
     margin-top: 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 0 4px 4px;
     scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,0.08) transparent;
+    scrollbar-gutter: stable;
+    scrollbar-color: rgba(255,255,255,0.3) rgba(255,255,255,0.035);
     mask-image: linear-gradient(to bottom, transparent 0%, black 12px, black 100%);
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12px, black 100%);
   }
 
-  .transcript::-webkit-scrollbar { width: 4px; }
-  .transcript::-webkit-scrollbar-track { background: transparent; }
-  .transcript::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+  .transcript:focus-visible { outline: 1px solid rgba(255,255,255,0.2); outline-offset: 2px; }
+  .transcript::-webkit-scrollbar { width: 8px; }
+  .transcript::-webkit-scrollbar-track { background: rgba(255,255,255,0.035); border-radius: 6px; }
+  .transcript::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius: 6px; }
+  .transcript::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.48); }
 
   .msg {
+    position: relative;
     padding: 10px 14px;
     border-radius: 12px;
     font-size: 13.5px;
@@ -315,6 +360,127 @@
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
   }
+
+  .msg .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  .channel-badge {
+    float: right;
+    margin: 0 0 3px 9px;
+    font-size: 12px;
+    line-height: 1.4;
+    cursor: help;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* ── Typed-message composer ── */
+  .composer {
+    position: sticky;
+    bottom: 0;
+    width: 100%;
+    max-width: 640px;
+    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 12px 4px 2px;
+    background: linear-gradient(to bottom, rgba(5,5,9,0.92), var(--c-bg) 18px);
+    z-index: 2;
+  }
+
+  .composer textarea {
+    width: 100%;
+    min-height: 44px;
+    max-height: 140px;
+    resize: vertical;
+    padding: 12px 14px;
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.045);
+    color: var(--c-text-bright);
+    font: 14px/1.45 var(--font-body);
+  }
+
+  .composer textarea::placeholder { color: var(--c-text-dim); }
+  .composer textarea:focus-visible,
+  .composer select:focus-visible,
+  .send-btn:focus-visible,
+  .retry-btn:focus-visible {
+    outline: 2px solid var(--c-listen);
+    outline-offset: 2px;
+  }
+
+  .send-btn {
+    align-self: stretch;
+    padding: 0 16px;
+    border: 1px solid rgba(74,222,128,0.2);
+    border-radius: 12px;
+    background: var(--c-listen-dim);
+    color: var(--c-listen);
+    font: 600 12px var(--font-body);
+    cursor: pointer;
+  }
+
+  .send-btn:hover:not(:disabled) { background: rgba(74,222,128,0.2); }
+  .send-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .composer-options {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    min-height: 24px;
+    padding: 0 4px;
+    color: var(--c-text-dim);
+    font-size: 11px;
+  }
+
+  .composer-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+  }
+
+  .composer-option input { accent-color: var(--c-listen); }
+
+  .composer select {
+    max-width: 190px;
+    padding: 5px 8px;
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 8px;
+    background: #11131a;
+    color: var(--c-text);
+    font: 11px var(--font-body);
+  }
+
+  .action-option[hidden] { display: none; }
+  .composer-status { margin-left: auto; }
+
+  .retry-btn {
+    margin-left: 8px;
+    padding: 2px 7px;
+    border: 1px solid rgba(248,113,113,0.24);
+    border-radius: 7px;
+    background: transparent;
+    color: #fca5a5;
+    font: 600 10px var(--font-body);
+    cursor: pointer;
+  }
+
+  .msg .turn-status { color: #fca5a5; }
+  .msg .turn-status.sent { color: var(--c-text-dim); }
 
   /* Active session mode (translation) with its escape hatch */
   .mode-chip {
@@ -425,6 +591,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    /* Wrap instead of overflowing: on a phone the persona/mic/camera row
+       is wider than the screen and the clipped edge made the buttons
+       untappable. Wrapping keeps every control on-screen. */
+    flex-wrap: wrap;
+    gap: 8px 12px;
     flex-shrink: 0;
     z-index: 2;
   }
@@ -448,6 +619,76 @@
     background: var(--c-listen-dim);
     color: var(--c-listen);
     border-color: rgba(74,222,128,0.15);
+  }
+
+  /* ── Personality selector (chip + floating catalog panel) ── */
+  .persona-wrap { position: relative; }
+
+  .persona-panel {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 0;
+    width: 280px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: rgba(18,20,26,0.97);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    z-index: 10;
+  }
+  .persona-panel[hidden] { display: none; }
+
+  .persona-item {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "label preview" "desc preview";
+    align-items: center;
+    gap: 2px 10px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--c-text);
+    text-align: left;
+    cursor: pointer;
+  }
+  .persona-item:hover { background: var(--c-surface-hover); }
+  .persona-item.selected {
+    background: var(--c-listen-dim);
+    box-shadow: inset 2px 0 0 var(--c-listen);
+  }
+  .persona-item .p-label {
+    grid-area: label;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .persona-item.selected .p-label { color: var(--c-listen); }
+  .persona-item .p-desc {
+    grid-area: desc;
+    font-size: 11.5px;
+    color: var(--c-text-dim);
+  }
+  .persona-item .p-preview {
+    grid-area: preview;
+    width: 26px;
+    height: 26px;
+    display: grid;
+    place-items: center;
+    font-size: 10px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 50%;
+    background: var(--c-surface);
+    color: var(--c-text-dim);
+    cursor: pointer;
+  }
+  .persona-item .p-preview:hover {
+    color: var(--c-listen);
+    border-color: rgba(74,222,128,0.3);
   }
 
   .state-indicator {
@@ -478,3 +719,54 @@
     50% { opacity: 0.4; transform: scale(0.8); }
   }
 
+
+  /* -- Mobile: keep the control bar inside the visible, thumb-reachable
+     area (portrait phones are narrower than the controls row and their
+     browser toolbars cover the bottom edge) -- */
+  @media (max-width: 600px) {
+    header { padding: 12px 8px 0; }
+    .logo h1 { font-size: 17px; }
+    .model-label { display: none; }      /* the header already shows it */
+    .portal-stack { padding-top: 12px; }
+    .controls { justify-content: center; padding-top: 10px; }
+    .ctrl-btn { padding: 10px 14px; }    /* comfortable touch target */
+    .on-device-pill { display: none; }   /* duplicate of the model label */
+    .waveform-wrap { margin-top: 10px; height: 40px; }
+    .transcript { margin-top: 10px; }
+    .composer { padding-top: 8px; gap: 7px; }
+    .composer textarea { min-height: 42px; padding: 10px 11px; }
+    .send-btn { padding: 0 11px; }
+    .composer-options { gap: 7px 12px; font-size: 10.5px; }
+    /* The catalog panel is anchored to the chip's left edge on desktop;
+       with the controls centered on a narrow screen that anchor can run
+       off the right edge, so pin it to the viewport center here. */
+    .persona-panel {
+      position: fixed;
+      left: 50%;
+      right: auto;
+      bottom: calc(64px + env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      width: min(320px, calc(100vw - 24px));
+      max-height: 55dvh;
+    }
+  }
+
+  @media (max-width: 600px) and (max-height: 760px) {
+    .portal-stack { padding-top: 8px; }
+    .viewport-wrap {
+      width: min(100%, calc(28dvh * 16 / 9));
+      max-height: 28dvh;
+    }
+    .waveform-wrap { height: 30px; margin-top: 6px; }
+    .transcript { min-height: 80px; }
+    .controls { padding-top: 6px; }
+    .composer { padding-top: 6px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .camera-preview,
+    .camera-preview.is-collapsed {
+      transition: none;
+      transform: none;
+    }
+  }

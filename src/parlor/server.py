@@ -1,18 +1,20 @@
-"""Parlor — on-device, real-time multimodal AI (voice + vision).
+"""Parlor — real-time multimodal AI (voice + vision) on a cloud LLM.
 
-LLM inference runs on llama.cpp (llama-server, spawned as a subprocess —
-see llama.py). This server owns the conversation history and re-sends it
-every request; llama-server's prefix cache makes that cheap, and it also
-enables two speculative tricks (see pipeline.py): the camera frame and the
-user's speech (in ~3s chunks) are pushed through cache-priming requests
-WHILE the user is still talking, so the final request only pays for the
-tail of the utterance.
+Instead of a local llama.cpp model, the stack talks to hosted providers:
+the utterance is transcribed through the OpenAI speech API (see cloud.py),
+the reply streams from any OpenAI-compatible chat endpoint (api.openai.com
+directly, or OpenRouter), and TTS is cloud-speached sentence-by-sentence
+(see tts.py). This server owns the conversation history and re-sends it
+every request; the client holds it prompt-free, so a turn's cost is just
+the model's own tokens. No local model downloads, no GPU needed.
 """
 
 import asyncio
+import base64
 import itertools
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -20,12 +22,21 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-sys.stdout.reconfigure(line_buffering=True)  # logs stream even when piped
+# Piped stdout on Windows defaults to cp1252 ('strict'): one non-latin1
+# character in ANY log line ('→' in timings, a Spanish transcript) killed
+# every LLM turn mid-flight — after the reply arrived, before the decider
+# ran — so the whole turn collapsed to a silent release. UTF-8 makes the
+# console file byte-readable everywhere; 'replace' keeps residue harmless.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except (AttributeError, ValueError):  # pragma: no cover
+        pass
 
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 try:  # raised by ws.send_text after the client goes away (uvicorn-specific)
@@ -37,24 +48,25 @@ except ImportError:  # pragma: no cover
 DISCONNECT_ERRORS = (WebSocketDisconnect, ClientDisconnected)
 
 from dotenv import load_dotenv
-load_dotenv()  # before importing llama — it reads its config at import time
+load_dotenv()  # before importing cloud — it reads its config at import time
 
-from parlor import actions, llama, reasoner, tts
+from parlor import actions, cloud, personas, reasoner, tts
 from parlor.modes import MODES
-from parlor.pipeline import (estimate_tokens, pad_tail_silence, prime_cache,
-                             release_client, run_turn, send_json, text_part,
-                             user_content, valid_audio, wav_to_float32)
+from parlor.pipeline import (estimate_tokens, image_part, merge_wavs,
+                             release_client, run_turn, send_json,
+                             speak_only, text_part, valid_audio,
+                             wav_to_float32)
 
-# Turn completeness is judged by the smart-turn audio classifier before the
-# LLM is involved, so the prompt carries no FINISHED/WAIT machinery at all.
-# Asking Gemma to judge it instead scores at chance on audio — see
-# benchmarks/turnbench.py, which still reproduces those two variants.
+# Turn completeness is judged by smart-turn for audio before the LLM is
+# involved, so prompts carry no FINISHED/WAIT machinery. Spoken words arrive
+# pre-transcribed by OpenAI STT; typed messages stay ordinary text.
 SYSTEM_PROMPT = (
-    "You are a friendly, conversational AI assistant. The user talks to you "
-    "through a microphone and may show you their camera. Your replies are "
-    "spoken aloud, so write plain conversational text without formatting. "
-    "If an audio message is just your own previous reply playing back "
-    "(echo), don't answer it — briefly ask what they'd like to talk about."
+    "You are a friendly, conversational AI assistant. The user may type a "
+    "message, speak (which arrives as a transcript of what they actually "
+    "said), and may show you their camera. Respond naturally in plain text; "
+    "some replies are spoken aloud and others are text-only. If a speech "
+    "transcript is just your own previous reply playing back (echo), don't "
+    "answer it — briefly ask what they'd like to talk about."
 )
 
 # The model's replies are pure speech: it never emits control markup.
@@ -95,29 +107,30 @@ RESEARCH_NOTE = (
 # its concern: the action decider judges every utterance BEFORE this
 # prompt runs (see the turn loop), so the prompt stays a pure interpreter.
 TRANSLATE_PROMPT = (
-    "Live translation mode. Begin your reply with one line: ###TRANSCRIPT: "
-    "followed by the exact words the user said in this message's audio, in "
-    "their original language. Then, on a new line, write ONLY the English "
-    "translation of those words — no commentary, no answers, no opinions. "
-    "If they already spoke English, restate their words in clear English. "
-    "If the audio has no clear words, write ###TRANSCRIPT: (no speech) "
-    "and nothing else."
+    "Translate what the user said into English. Output ONLY the English "
+    "translation of the words above — no commentary, no answers, no "
+    "opinions. If they already spoke English, restate their words in "
+    "clear English."
 )
 
-# The per-utterance instruction in listen mode: a silent scribe. Exit
-# detection likewise lives in the decider, keeping this prompt pure.
-LISTEN_PROMPT = (
-    "Quiet listening mode. The user asked you to just listen while they "
-    "talk or think out loud. Begin your reply with one line: "
-    "###TRANSCRIPT: followed by the exact words the user said in this "
-    "message's audio. Then write NOTHING else — no reply, no commentary, "
-    "no questions. If the audio has no clear words, write ###TRANSCRIPT: "
-    "(no speech) and nothing else."
+TEXT_TRANSLATE_PROMPT = (
+    "Translate the user's written text into English. Output ONLY the "
+    "English translation — no commentary, answers, or opinions. If it is "
+    "already English, restate it in clear English."
+)
+
+TEXT_RESPOND_PROMPT = (
+    "Respond directly to the user's written message in one to four short, "
+    "natural sentences.{camera}"
 )
 
 # Modes whose audio turns replace the standard respond/flush instruction
 # wholesale (the mode chooses what a turn IS, not just how it's phrased).
-MODE_PROMPTS = {"translate": TRANSLATE_PROMPT, "listen": LISTEN_PROMPT}
+# Listen has no per-turn prompt: its content turns are transcribed and
+# shown client-side WITHOUT an LLM call — the words the user thinks aloud
+# are already known precisely (the STT text), so re-asking a model to
+# echo them as a transcript line would only paraphrase and burn tokens.
+MODE_PROMPTS = {"translate": TRANSLATE_PROMPT}
 
 # The ring is a server-initiated turn like a delegation delivery: the
 # model phrases the announcement, and if it yields nothing speakable the
@@ -174,41 +187,20 @@ DELIVER_FALLBACK = "Sorry — I couldn't get an answer for that one."
 # an off-the-rails reply must not queue an HTTP call per imagined tag.
 MAX_PENDING_DELEGATIONS = 3
 
-# The transcript line LEADS the reply: transcribing after the response
-# turns the transcript into a paraphrase from memory (WER 0.39 vs 0.00 on a
-# clean 33-word utterance), and the leading line reaches the client while
-# the response still decodes. Costs its decode time (~0.2s short / ~0.7s
-# long utterances) before first audio — measured worth it. Grammar-forced
-# JSON ({transcript, response}) was also measured: format breaks 1-3/3 on
-# degraded audio and 3/3 on chunked — don't go back to structured output.
-# The no-speech clause gives the model a sanctioned out for VAD false
-# triggers (breath, cough, room noise). Without it the prompt DEMANDS
-# words, so on speechless audio the model invents some — measured at
-# temp 0.7: a breath came back as "Hi, can you help me with my homework?"
-# (answered), "can you translate everything I say from now on?" (mode
-# switched!), or an earlier turn's question copied verbatim. "this
-# message's audio" (not "their audio message") points the transcription
-# at the newest clip among the many in history; measured clean with this
-# wording at temp 0 and 0.7 (WER 0.0 on speech, fresh and late).
-NO_SPEECH_CLAUSE = (
-    " If the audio has no clear words — noise, breathing, silence — write "
-    "###TRANSCRIPT: (no speech) instead; never guess words or repeat "
-    "earlier ones."
-)
-
+# A "respond" turn: the user's transcript leads the message (the STT
+# words), the instruction follows. With cloud STT the transcript is
+# exact by construction — no leading ###TRANSCRIPT: line is asked of
+# the model and none needs parsing out of the reply.
 RESPOND_PROMPT = (
-    "Begin your reply with one line: ###TRANSCRIPT: followed by the exact "
-    "words the user said in this message's audio." + NO_SPEECH_CLAUSE +
-    " Then, on a new line, respond "
-    "to them: 1-4 short sentences, spoken aloud.{camera}"
+    "Respond to what the user said: 1-4 short sentences, spoken aloud."
+    "{camera}"
 )
 
 # The clause a camera turn appends to its instruction — a named constant
 # so benchmarks measure the production wording, never a retyped copy.
-CAMERA_CLAUSE = " Mention what you see on their camera if relevant."
+CAMERA_CLAUSE = " Mention what you see in their camera image if relevant."
 
-# Spoken when a turn yields no reply at all (models of every size
-# occasionally emit only the transcript line) — silence would leave the
+# Spoken when a turn yields no reply at all — silence would leave the
 # user hanging, and a stored transcript-only reply teaches the model to
 # do it again next turn.
 FLUSH_FALLBACK = "Take your time — I'm listening."
@@ -217,15 +209,12 @@ AUDIO_FALLBACK = "Sorry, I didn't catch that — could you say it again?"
 # A "flush" turn: the classifier judged the utterance unfinished, the user
 # then stayed silent, so answer what we have — the model decides whether it
 # is answerable or needs encouragement to continue. Dedicated prompt: with
-# a bolted-on suffix the model would sometimes emit the transcript line and
-# stop, leaving the turn silent.
+# a bolted-on suffix the model would sometimes answer as if spoken complete.
 FLUSH_PROMPT = (
-    "Begin your reply with one line: ###TRANSCRIPT: followed by the exact "
-    "words the user said in this message's audio." + NO_SPEECH_CLAUSE +
-    " The user paused mid-thought, "
-    "so on a new line: if their words feel unfinished, write one short, warm "
-    "sentence encouraging them to continue; otherwise respond to them in 1-4 "
-    "short sentences, spoken aloud.{camera}"
+    "The user paused mid-thought and stayed quiet. If their words feel "
+    "unfinished, write one short, warm sentence encouraging them to "
+    "continue; otherwise respond to them in 1-4 short sentences, spoken "
+    "aloud.{camera}"
 )
 
 # A sense of elapsed time. The model can't perceive silence between
@@ -262,13 +251,48 @@ def elapsed_phrase(seconds: float) -> str:
     return f"about {round(seconds / 3600)} hours"
 
 
-# Rotate history before the llama context fills. Rough token estimates are
-# fine here — the guard just needs to fire before generation degrades.
-# Scaled to the context size: a fixed 2000 against the suite's small
-# LLAMA_CTX left a near-zero threshold, rotating on every turn — history
-# never accumulated, so the e2e suite silently stopped exercising
-# multi-turn context at all.
-CONTEXT_HEADROOM = max(512, min(2000, llama.CTX // 8))
+def _message_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    return "\n".join(p.get("text", "") for p in content
+                     if isinstance(p, dict) and p.get("type") == "text")
+
+
+# Any run of ECHO_WORDS consecutive words of the last reply heard again by
+# the mic is OUR TTS playing back, not the user: the browser's raised VAD
+# threshold catches most of it, but a late catch — or loud speakers —
+# lands as a transcript. Genuine speech doesn't reproduce an 8-word run
+# verbatim (the old on-device build drew the line at 5 words for prompt
+# echoes; the reply itself repeats prompt-ish phrases far more often).
+ECHO_WORDS = 8
+
+
+def _norm_words(text: str) -> list[str]:
+    return re.sub(r"[^a-z0-9' ]+", " ", text.lower()).split()
+
+
+def looks_like_echo(transcript: str, history: list) -> bool:
+    last = ""
+    for m in reversed(history):
+        if m.get("role") == "assistant":
+            last = _message_text(m.get("content"))
+            break
+    if not last:
+        return False
+    t_words = _norm_words(transcript)
+    if len(t_words) < ECHO_WORDS:
+        return False
+    hay = " " + " ".join(_norm_words(last)) + " "
+    return any(" " + " ".join(t_words[i:i + ECHO_WORDS]) + " " in hay
+               for i in range(len(t_words) - ECHO_WORDS + 1))
+
+
+# Rotate history before the token budget fills. Rough estimates are fine
+# here — the guard just needs to fire before the context and the bill
+# get silly. Cloud models have very large contexts; the rotation limit
+# is a cost/brevity dial, not a hard ceiling.
+HISTORY_ROTATE_TOKENS = int(os.environ.get("HISTORY_ROTATE_TOKENS", "24000"))
+CONTEXT_HEADROOM = 2000
 
 
 def rotate_history(history: list) -> list:
@@ -289,14 +313,19 @@ tts_backend = None
 detector = None  # smart-turn end-of-turn classifier
 
 # Reasoner calls block for up to REASONER_TIMEOUT — keep them off the
-# default executor, which serves the latency-critical path (llama
-# streaming, TTS, the turn classifier, cache priming).
+# default executor, which serves the latency-critical path (LLM streaming,
+# TTS, the turn classifier).
 REASONER_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="reasoner")
 
 
 def load_models():
     global tts_backend, detector
-    llama.start()
+    # No local LLM: there is nothing to spawn. A missing key surfaces on
+    # the first request; the polite check is here so the operator sees
+    # it at startup instead.
+    if not cloud.enabled():
+        print("WARNING: OPENAI_API_KEY is not set — voice turns will fail "
+              "until it is (see .env.example).")
     from parlor.turn_detector import TurnDetector
     detector = TurnDetector()
     tts_backend = tts.load()
@@ -306,7 +335,6 @@ def load_models():
 async def lifespan(app):
     await asyncio.get_event_loop().run_in_executor(None, load_models)
     yield
-    llama.stop()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -316,11 +344,22 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "web" / "stat
 @app.get("/")
 async def root():
     html = (Path(__file__).parent / "web" / "index.html").read_text()
-    return HTMLResponse(content=html.replace("{{model}}", llama.model_label()))
+    return HTMLResponse(content=html.replace("{{model}}", cloud.model_label()))
 
 
-def turn_instruction(msg: dict, has_image: bool, has_audio: bool) -> str:
-    if has_audio:
+@app.get("/personas")
+async def personas_catalog():
+    """The curated personality catalog: key/label/description per preset.
+    Voice ids, style instructions and persona prompts live server-side —
+    the client never ships a prompt."""
+    return JSONResponse([
+        {"key": p.key, "label": p.label, "description": p.description}
+        for p in personas.PRESETS
+    ])
+
+
+def turn_instruction(msg: dict, has_image: bool, has_transcript: bool) -> str:
+    if has_transcript:
         camera = CAMERA_CLAUSE if has_image else ""
         prompt = FLUSH_PROMPT if msg.get("type") == "flush" else RESPOND_PROMPT
         return prompt.format(camera=camera)
@@ -335,9 +374,20 @@ async def websocket_endpoint(ws: WebSocket):
 
     delegation = reasoner.enabled()
     clock = time.strftime("%A at %I:%M %p").replace(" 0", " ")
-    system = (SYSTEM_PROMPT + SESSION_CLOCK.format(clock=clock)
-              + CAPABILITY_NOTE + (RESEARCH_NOTE if delegation else ""))
-    history: list = [{"role": "system", "content": system}]
+    persona = personas.get("neutral")
+
+    def system_prompt(p: personas.Persona) -> str:
+        text = (SYSTEM_PROMPT + SESSION_CLOCK.format(clock=clock)
+                + CAPABILITY_NOTE + (RESEARCH_NOTE if delegation else ""))
+        if p.system:
+            text += " " + p.system
+        return text
+
+    history: list = [{"role": "system", "content": system_prompt(persona)}]
+    # Keep a typed user message even when the provider fails. The request ID
+    # makes an explicit retry reuse that same history entry instead of
+    # appending duplicate user text.
+    text_turn_inputs: dict[str, dict] = {}
     mode = MODES["conversation"]
 
     interrupted = asyncio.Event()
@@ -366,26 +416,30 @@ async def websocket_endpoint(ws: WebSocket):
     recv_task = asyncio.create_task(receiver())
 
     frame_image: str | None = None   # camera frame held for the current utterance
-    speech_chunks: list[str] = []    # streamed-in speech, already cache-primed
+    speech_chunks: list[str] = []    # streamed-in speech of the current utterance
     held_audio: list[str] = []       # incomplete-turn segments awaiting continuation
 
     def remember(user_msg: dict, raw_text: str, no_speech: bool) -> None:
-        """Store a finished turn verbatim (same bytes → full prefix-cache
-        hit on the next request). Two kinds of turn are never stored,
-        because a degenerate message poisons every later request: one the
-        model produced nothing for, and a no_speech turn (the transcript
-        line was a no-speech annotation or an instruction echo — no user
-        words stand behind it; one stored echo loop came back as invented
-        or copied user words on every turn after it). Voice turns must
-        keep their raw audio: an experiment storing the transcript as
-        user text instead made the model copy the PREVIOUS turn's text as
-        the new turn's transcript, deterministically at temp 0 —
-        user-role text reads as 'what the user said' more strongly than
-        the current audio does."""
+        """Store a finished turn verbatim. Some providers reuse a prefix
+        cache when consecutive requests share a leading context, and
+        byte-stable messages keep that hit alive. Two kinds of turn are
+        never stored, because a degenerate message poisons every later
+        request: one the model produced nothing for, and a no_words turn
+        (the STT heard nothing, or heard our own reply playing back — no
+        user words stand behind it; one stored echo loop came back as
+        invented or copied user words on every turn after it)."""
         if not raw_text.strip() or no_speech:
             return
         history.append(user_msg)
         history.append({"role": "assistant", "content": raw_text})
+
+    def remember_user_only(user_msg: dict) -> None:
+        """A listen-mode content turn: the user's words are kept —
+        thinking out loud is context the later exit question builds on —
+        but there is no assistant reply to pair with them (the turn ends
+        silent BY DESIGN). Consecutive user messages are fine for cloud
+        chat APIs."""
+        history.append(user_msg)
 
     delegation_ids = itertools.count(1)
     delegation_tasks: set[asyncio.Task] = set()
@@ -397,7 +451,7 @@ async def websocket_endpoint(ws: WebSocket):
     # speech streaming in (so a long monologue doesn't read as a long
     # silence). The gap since it is the "quiet" the time note reports.
     last_activity = {"t": time.time()}
-    prompt_tokens = {"last": 0}  # real context size, from llama-server usage
+    prompt_tokens = {"last": 0}  # real context size, from the usage chunk
 
     def floor_busy() -> bool:
         """The floor is held by the user (audio held for a continuation, a
@@ -494,17 +548,14 @@ async def websocket_endpoint(ws: WebSocket):
     async def proactive_turn(prompt: str, fallback: str) -> None:
         """A server-initiated turn — a delegation delivery or a timer ring:
         the model phrases it, TTS speaks it, and history keeps it like any
-        real turn. expect_transcript=True although there is no audio: the
-        model often opens one with an imitated ###TRANSCRIPT: line, and the
-        transcript parser consumes it and streams the real reply; with
-        False the ##-markup cut would swallow the whole thing (observed
-        live). Nothing server-initiated ever acts: the action decider only
-        judges real user turns."""
+        real turn. Nothing server-initiated ever acts: the action decider
+        only judges real user turns."""
         user_msg = {"role": "user", "content": [text_part(prompt)]}
         raw_text, pt, _, spoke = await run_turn(
             ws, history + [user_msg], interrupted, active, tts_backend,
-            expect_transcript=True, tts_voice=mode.tts_voice,
-            proactive=True, fallback=fallback)
+            expect_transcript=False, tts_voice=persona.voice or mode.tts_voice,
+            tts_instructions=persona.tts_instructions,
+            proactive=True, fallback=fallback, instruction=prompt)
         if pt:
             prompt_tokens["last"] = pt
         if spoke:
@@ -589,28 +640,20 @@ async def websocket_endpoint(ws: WebSocket):
                                      duration=duration_phrase(done["seconds"]))
         await proactive_turn(prompt, TIMER_FALLBACK.format(label=done["label"]))
 
-    async def prime(audio_b64s: list[str]) -> None:
-        """Warm the cache for the turn as it stands so far — reads the live
-        history and held camera frame, so it must stay in this scope."""
-        await prime_cache(history + [
-            {"role": "user", "content": user_content(frame_image, audio_b64s)}])
-
     try:
         while True:
             msg = await msg_queue.get()
             if msg is None:
                 break
 
-            # Rotate history before the llama context fills: keep the system
-            # prompt and the most recent exchanges. The REAL count from the
-            # last request wins over the estimate — when the estimate
-            # undershoots (camera turns), llama-server silently truncates
-            # the oldest turns first, which reads as the model "forgetting".
+            # Rotate history before the token budget fills: keep the system
+            # prompt and the most recent exchanges. Cloud contexts are huge;
+            # this fires early enough to keep turns (and their cost) small.
             # Double headroom because the incoming turn isn't counted yet;
             # drop a quarter (not half) so a rotation is barely noticeable.
             est = estimate_tokens(history)
             used = max(est, prompt_tokens["last"])
-            if used > llama.CTX - 2 * CONTEXT_HEADROOM:
+            if used > HISTORY_ROTATE_TOKENS - 2 * CONTEXT_HEADROOM:
                 rotated = rotate_history(history)
                 if len(rotated) < len(history):
                     print(f"Context near limit (est {est}, real {prompt_tokens['last']}) "
@@ -635,6 +678,49 @@ async def websocket_endpoint(ws: WebSocket):
                 # that must work even when the model mistranslates the
                 # spoken exit command.
                 await switch_mode(str(msg.get("mode", "")))
+                continue
+
+            if msg.get("type") == "set_personality":
+                # Palette switch: voice + delivery + chat persona ride the
+                # NEXT request wholesale — nothing in the pipeline cares
+                # which model "was" speaking, so the switch is instant and
+                # keeps the conversation (the system message is rewritten
+                # in place: the old persona clause leaves future turns).
+                p = personas.get(str(msg.get("key", "")))
+                if p.key != persona.key:
+                    persona = p
+                    history[0] = {"role": "system",
+                                  "content": system_prompt(persona)}
+                    print(f"Persona → {persona.label} ({persona.voice or 'default voice'})")
+                await send_json(ws, {"type": "personality_changed",
+                                     "key": persona.key,
+                                     "label": persona.label})
+                continue
+
+            if msg.get("type") == "voice_preview":
+                # One short sample line, synthesized OUTSIDE any turn (no
+                # history entry, no turn frames — distinct preview_* frames
+                # keep the client's transcript/playback state untouched).
+                p = personas.get(str(msg.get("key", "")))
+                try:
+                    pcm = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: tts_backend.generate(
+                            p.sample_line,
+                            voice=p.voice or mode.tts_voice,
+                            instructions=p.tts_instructions))
+                    pcm_int16 = (pcm * 32767).clip(-32768, 32767).astype(np.int16)
+                    await send_json(ws, {"type": "voice_preview_start",
+                                         "sample_rate": tts_backend.sample_rate})
+                    await send_json(ws, {"type": "voice_preview_chunk",
+                                         "audio": base64.b64encode(
+                                             pcm_int16.tobytes()).decode()})
+                    await send_json(ws, {"type": "voice_preview_end"})
+                except DISCONNECT_ERRORS:
+                    raise
+                except Exception:
+                    traceback.print_exc()  # preview failure keeps the session
+                    await send_json(ws, {"type": "voice_preview_end",
+                                         "failed": True})
                 continue
 
             if msg.get("type") == "delegation_done":
@@ -691,11 +777,59 @@ async def websocket_endpoint(ws: WebSocket):
                                          "id": msg["id"], "cancelled": True})
                 continue
 
+            is_text_turn = msg.get("type") == "text_turn"
+            if is_text_turn:
+                request_id = msg.get("request_id")
+                text = msg.get("text")
+                if (not isinstance(request_id, str) or not request_id
+                        or len(request_id) > 128
+                        or not isinstance(text, str) or not text.strip()):
+                    await send_json(ws, {
+                        "type": "turn_error",
+                        "request_id": request_id if isinstance(request_id, str) else None,
+                        "message": "No se pudo enviar el mensaje / Message could not be sent.",
+                    })
+                    continue
+                existing = text_turn_inputs.get(request_id)
+                if existing and existing["completed"]:
+                    await send_json(ws, {
+                        "type": "turn_error", "request_id": request_id,
+                        "message": "Este mensaje ya fue procesado / This message was already processed.",
+                    })
+                    continue
+                msg["text"] = text
+                image = msg.get("image")
+                if not isinstance(image, str) or len(image) > 2_000_000:
+                    image = None
+                msg["image"] = image
+                # Translation is an explicit per-message choice, available
+                # from the composer when translate mode is active. Preserve
+                # the payload on retry even if a reconnect reset the mode.
+                response_style = (existing["response_style"] if existing
+                                  else msg.get("response_style"))
+                if (not isinstance(response_style, str)
+                        or response_style not in {"translate", "chat"}):
+                    response_style = "translate" if mode.name == "translate" else "chat"
+                msg["response_style"] = response_style
+                # Speaking is opt-in on every typed request. A missing or
+                # non-boolean field must never silently enable paid TTS.
+                requested_speech = msg.get("speak_reply", msg.get("speak"))
+                msg["speak_reply"] = (existing["speak_reply"] if existing else
+                                      requested_speech is True)
+                if existing and (existing["text"] != text
+                                 or existing["response_style"] != msg["response_style"]
+                                 or existing["speak_reply"] != msg["speak_reply"]
+                                 or existing["image"] != msg.get("image")):
+                    await send_json(ws, {
+                        "type": "turn_error", "request_id": request_id,
+                        "message": "El ID ya pertenece a otro mensaje / Request ID belongs to another message.",
+                    })
+                    continue
+
             if msg.get("type") == "frame":
                 if msg.get("image") and mode.wants_camera:
                     frame_image = msg["image"]
-                    speech_chunks = []
-                    await prime(held_audio)
+                    speech_chunks = []  # a new frame opens a new utterance
                 continue
 
             if msg.get("type") == "speech_chunk":
@@ -704,15 +838,18 @@ async def websocket_endpoint(ws: WebSocket):
                 if valid_audio(msg.get("audio")):
                     speech_chunks.append(msg["audio"])
                     last_activity["t"] = time.time()
-                    await prime(held_audio + speech_chunks)
                 continue
 
             interrupted.clear()
+            text_turn_completed = False
             audio_b64s = held_audio + (speech_chunks if msg.get("chunked") else [])
             speech_chunks = []
             if valid_audio(msg.get("audio")):
                 audio_b64s.append(msg["audio"])
-            image = (msg.get("image") or frame_image) if mode.wants_camera else None
+            if is_text_turn:
+                image = msg.get("image")
+            else:
+                image = (msg.get("image") or frame_image) if mode.wants_camera else None
             has_audio = bool(audio_b64s)
             is_flush = msg.get("type") == "flush"
 
@@ -722,18 +859,18 @@ async def websocket_endpoint(ws: WebSocket):
                 drain_ready()  # the floor is provably free here
                 continue
 
-            # From here on any failure (malformed WAV included — valid_audio
-            # only checks length) must release the client, not kill the
-            # session loop.
+            # From here on a turn failure (malformed WAV included —
+            # valid_audio only checks length) must release/report to the
+            # client, not kill the session loop.
             p_complete = None  # smart-turn probability, surfaced in the UI
             try:
                 # The audio classifier judges completeness before the LLM is
-                # involved at all. Incomplete → hold the segments (they stay
-                # in the next turn's content AND warm in the cache) and wait.
-                # A flush turn skips the check: the client waited out the
-                # hold and now wants an answer to whatever we have. Translate
-                # mode skips it entirely — an interpreter renders on a short
-                # silence, it does not wait out thinking pauses.
+                # involved at all. Incomplete → hold the segments (they ride
+                # in the next turn's content) and wait. A flush turn skips
+                # the check: the client waited out the hold and now wants an
+                # answer to whatever we have. Translate mode skips it
+                # entirely — an interpreter renders on a short silence, it
+                # does not wait out thinking pauses.
                 if has_audio and not is_flush and mode.uses_smart_turn:
                     pcm = np.concatenate([wav_to_float32(b) for b in audio_b64s])
                     t0 = time.time()
@@ -743,23 +880,51 @@ async def websocket_endpoint(ws: WebSocket):
                     p_complete = round(prob, 2)
                     if not complete and not interrupted.is_set():
                         held_audio = audio_b64s
-                        # Release the client BEFORE the (slow) cache priming:
+                        # Release the client BEFORE the transcription stall:
                         # until turn_incomplete arrives it can't capture a
-                        # resumed utterance, and the flush timer's live-speech
-                        # guard can't see the user talking.
+                        # resumed utterance, and the flush timer's
+                        # live-speech guard can't see the user talking.
                         await send_json(ws, {
                             "type": "turn_incomplete",
                             "decision_s": decision_s, "p_complete": p_complete,
                         })
-                        await prime(held_audio)
                         continue
 
-                # Padding the final segment diverges it from its primed bytes
-                # on flush turns (≤3s re-prefilled) — the honest-transcript
-                # win beats that; the continuation path keeps its cache hits.
+                # Merge the streamed segments into one WAV and hand it to
+                # the STT. Blocking; the turn is stalled on it anyway, so
+                # it runs in the default executor.
                 if audio_b64s:
-                    audio_b64s[-1] = pad_tail_silence(audio_b64s[-1])
-                content = user_content(image, audio_b64s)
+                    t0 = time.time()
+                    wav = merge_wavs(audio_b64s)
+                    transcript = ""
+                    if wav:
+                        try:
+                            transcript = (await asyncio.get_event_loop()
+                                          .run_in_executor(
+                                              None, cloud.transcribe, wav)
+                                          ).strip()
+                        except Exception as e:
+                            print(f"STT failed: {e}")
+                    stt_s = round(time.time() - t0, 3)
+                    echo = bool(transcript) and looks_like_echo(transcript, history)
+                    if not transcript or echo:
+                        if echo:
+                            print(f"STT heard our own reply ({stt_s}s) — "
+                                  f"echo dropped: {transcript!r}")
+                        else:
+                            print(f"STT heard no words ({stt_s}s)")
+                    else:
+                        timings = {"stt_s": stt_s, "p_complete": p_complete}
+                        # The transcript LEADS: the client shows what was
+                        # heard while the reply still streams.
+                        await send_json(ws, {"type": "transcript",
+                                             "transcription": transcript,
+                                             "p_complete": p_complete})
+                else:
+                    transcript = ""
+                    echo = False
+                content = ([image_part(image)] if image else []) + \
+                          ([text_part(transcript)] if transcript else [])
                 frame_image = None
                 held_audio = []
 
@@ -769,26 +934,68 @@ async def websocket_endpoint(ws: WebSocket):
                 # immediately, so a translated exit command gets rendered
                 # once and THEN the switch lands (the vanishing chip is
                 # the confirmation). Listen turns decide BEFORE: they play
-                # nothing (the ~2s only delays the on-screen transcript),
+                # nothing (the ~1s only delays the on-screen transcript),
                 # and an exit ("what do you think?") must be ANSWERED, not
-                # silently transcribed — the decision picks the prompt.
+                # silently transcribed — the decision picks the path.
                 # Either way a decision FIRES only after the turn, gated
-                # on no_speech/interrupt like always.
+                # on no_words/interrupt like always.
                 decision = actions.NONE
-                pre_decided = mode.name == "listen" and has_audio
+                pre_decided = (mode.name == "listen" and has_audio
+                               and transcript)
                 if pre_decided:
                     decision = await asyncio.get_event_loop().run_in_executor(
-                        None, actions.decide_before, history, content, mode.name)
-                if pre_decided and decision.mode:
+                        None, actions.decide_before, history,
+                        [text_part(transcript)], mode.name)
+
+                if has_audio and (not transcript or echo):
+                    # No user words stand behind this turn (a breath once
+                    # "asked" to translate everything — measured live in
+                    # the on-device build). Nothing may act, nothing is
+                    # stored; a silent turn would leave the user hanging,
+                    # so speak the mode's fallback — except in listen
+                    # mode, where silence IS the contract.
+                    if mode.speaks_fallback and not interrupted.is_set():
+                        line = FLUSH_FALLBACK if is_flush else AUDIO_FALLBACK
+                        spoke = await speak_only(ws, line, tts_backend,
+                                                 tts_voice=persona.voice or mode.tts_voice,
+                                                 tts_instructions=persona.tts_instructions)
+                        if spoke:
+                            playing_since["t"] = time.time()
+                    else:
+                        await release_client(ws)
+                    last_activity["t"] = time.time()
+                    continue
+
+                if pre_decided and not decision.mode:
+                    # A listen content turn needs no reply and no LLM
+                    # call: the exact words were transcribed above.
+                    await send_json(ws, {"type": "turn_final",
+                                         "transcription": None,
+                                         "proactive": False,
+                                         "timings": timings,
+                                         "p_complete": p_complete,
+                                         "spoke": False})
+                    remember_user_only({"role": "user",
+                                        "content": [text_part(transcript)]})
+                    last_activity["t"] = time.time()
+                    continue
+
+                if is_text_turn:
+                    if msg["response_style"] == "translate":
+                        instruction = TEXT_TRANSLATE_PROMPT
+                    else:
+                        camera = CAMERA_CLAUSE if image else ""
+                        instruction = TEXT_RESPOND_PROMPT.format(camera=camera)
+                elif pre_decided and decision.mode:
                     # Addressed to the assistant (an exit command): answer
                     # it as a normal conversation turn, not as content.
                     instruction = RESPOND_PROMPT.format(camera="")
                 elif mode.name in MODE_PROMPTS and has_audio:
                     instruction = MODE_PROMPTS[mode.name]
                 else:
-                    instruction = turn_instruction(msg, bool(image), has_audio)
-                # Elapsed quiet, and whether a silent turn gets a spoken
-                # line, are per-mode policy — see modes.py for the whys.
+                    instruction = turn_instruction(msg, bool(image),
+                                                   has_audio)
+                # Elapsed quiet is a per-mode policy — see modes.py.
                 gap = time.time() - last_activity["t"]
                 if has_audio and mode.wants_time_note and gap >= TIME_NOTE_MIN_S:
                     phrase = elapsed_phrase(gap)
@@ -800,41 +1007,93 @@ async def websocket_endpoint(ws: WebSocket):
                     fallback = None       # a listen turn is MEANT to end silent
                 elif is_flush:
                     fallback = FLUSH_FALLBACK
-                elif has_audio:
+                elif has_audio and transcript:
                     fallback = AUDIO_FALLBACK
                 else:
-                    fallback = None       # no transcript line to stop short at
-                user_msg = {"role": "user", "content": content + [text_part(instruction)]}
+                    fallback = None
+                if is_text_turn:
+                    if request_id in text_turn_inputs:
+                        user_msg = text_turn_inputs[request_id]["user_msg"]
+                        if not any(item is user_msg for item in history):
+                            history.append(user_msg)
+                    else:
+                        user_msg = {
+                            "role": "user",
+                            "content": ([image_part(image)] if image else [])
+                                       + [text_part(msg["text"]), text_part(instruction)],
+                        }
+                        history.append(user_msg)
+                        text_turn_inputs[request_id] = {
+                            "user_msg": user_msg,
+                            "text": msg["text"],
+                            "response_style": msg["response_style"],
+                            "speak_reply": msg["speak_reply"],
+                            "image": msg.get("image"),
+                            "completed": False,
+                        }
+                    turn_messages = history.copy()
+                else:
+                    user_msg = {"role": "user", "content": content + [text_part(instruction)]}
+                    turn_messages = history + [user_msg]
                 raw_text, pt, no_speech, spoke = await run_turn(
-                    ws, history + [user_msg], interrupted, active,
-                    tts_backend, expect_transcript=has_audio,
+                    ws, turn_messages, interrupted, active,
+                    tts_backend, expect_transcript=False,
                     p_complete=p_complete,
-                    tts_voice=mode.tts_voice,
-                    fallback=fallback)
+                    tts_voice=persona.voice or mode.tts_voice,
+                    tts_instructions=persona.tts_instructions,
+                    fallback=fallback,
+                    # Typed messages have no synthetic transcript line to
+                    # guard; comparing a legitimate written answer (e.g.
+                    # an exact translation) to its prompt can suppress it.
+                    instruction="" if is_text_turn else instruction,
+                    tts_enabled=msg["speak_reply"] if is_text_turn else True,
+                    request_id=msg["request_id"] if is_text_turn else None)
+                if is_text_turn:
+                    text_turn_completed = True
+                    text_turn_inputs[request_id]["completed"] = True
                 if pt:
                     prompt_tokens["last"] = pt
                 if spoke:
                     playing_since["t"] = time.time()  # reply now playing client-side
-                if not pre_decided and not no_speech and not interrupted.is_set() \
-                        and (has_audio or msg.get("text")):
+                if (not pre_decided and not no_speech and not interrupted.is_set()
+                        and not (is_text_turn
+                                 and msg["response_style"] == "translate")
+                        and (has_audio or msg.get("text"))
+                        and bool(raw_text.strip())):
+                    action_messages = (
+                        history + [{"role": "assistant", "content": raw_text}]
+                        if is_text_turn else
+                        history + [user_msg, {"role": "assistant", "content": raw_text}]
+                    )
                     decision = await asyncio.get_event_loop().run_in_executor(
                         None, actions.decide_after,
-                        history + [user_msg,
-                                   {"role": "assistant", "content": raw_text}],
-                        mode.name)
+                        action_messages, mode.name)
                 if no_speech or interrupted.is_set():
-                    # No user words stand behind this turn (a breath once
-                    # "asked" to translate everything — measured live), or
-                    # the user cut it off: nothing may act.
+                    # No user words stand behind this turn, or the user
+                    # cut it off: nothing may act.
                     decision = actions.NONE
                 await apply_decision(decision)
-                remember(user_msg, raw_text, no_speech)
+                if is_text_turn:
+                    # The user entry was committed before generation. Keep
+                    # it even if the model returned no text; add only the
+                    # assistant side when a response exists.
+                    if raw_text.strip() and not no_speech:
+                        history.append({"role": "assistant", "content": raw_text})
+                else:
+                    remember(user_msg, raw_text, no_speech)
                 last_activity["t"] = time.time()
             except DISCONNECT_ERRORS:
                 raise
             except Exception:
                 traceback.print_exc()  # keep the session alive
-                await release_client(ws)
+                if is_text_turn and not text_turn_completed:
+                    await send_json(ws, {
+                        "type": "turn_error",
+                        "request_id": msg.get("request_id"),
+                        "message": "No se pudo procesar el mensaje / Message could not be processed.",
+                    })
+                else:
+                    await release_client(ws)
 
             # A result that finished while the floor was busy delivers now.
             drain_ready()
@@ -850,10 +1109,19 @@ async def websocket_endpoint(ws: WebSocket):
 
 def main() -> None:
     port = int(os.environ.get("PORT", "8000"))
-    # localhost, not 0.0.0.0: browsers treat http://localhost as a secure
-    # context but not http://0.0.0.0, and without one getUserMedia (mic,
-    # camera) doesn't exist.
-    uvicorn.run(app, host="localhost", port=port)
+    # Bind configurable (PARLOR_HOST). Default localhost ON PURPOSE: browsers
+    # treat http://localhost as a secure context but not http://<LAN-IP>, and
+    # without one getUserMedia (mic, camera) doesn't exist. A 0.0.0.0 bind is
+    # for LAN/mobile testing — the thorough browser then needs the device to
+    # mark the origin secure (chrome://flags) or a valid HTTPS front.
+    host = os.environ.get("PARLOR_HOST", "localhost").strip() or "localhost"
+    if host not in ("localhost", "127.0.0.1"):
+        print(f"Binding to {host!r}: on non-local hosts the browser needs a "
+              "SECURE CONTEXT for mic/camera — http://<ip> won't ask for them. "
+              "Mark the origin as secure on the device (chrome://flags "
+              "'unsafely-treat-insecure-origin-as-secure') or front it with "
+              "valid HTTPS (e.g. Tailscale).")
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

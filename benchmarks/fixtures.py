@@ -175,7 +175,15 @@ FIXTURES = {
 }
 
 # Synthesis kwargs (see _synthesize) for base fixtures that need them.
-BASE_KWARGS = {"incomplete_cutoff": {"keep_frac": 0.55}}
+# long_question's read must classify COMPLETE with margin through the
+# OpenAI-TTS voice mapping (smart-turn gates several pipeline tests on the
+# standard base fixtures): shimmer reads it at p(complete)=0.95 where the
+# former af_heart→alloy mapping landed at p=0.11 (an unfinished-feeling
+# prosody) and broke every turn-completion expectation. probe voices:
+# benchmarks/check_turns.py after regeneration (benchmarks/voice_probe.py
+# to rank OpenAI voices on a text directly).
+BASE_KWARGS = {"incomplete_cutoff": {"keep_frac": 0.55},
+               "long_question": {"voice": "shimmer"}}
 
 # Degraded re-recordings of base fixtures, reproducing live-mic conditions
 # clean synthesis can't: VAD-clipped word endings (the encoder hallucinates
@@ -188,10 +196,11 @@ VARIANTS = {
     # incomplete_cutoff's "I wanted to ask you…") — listen mode must stay
     # silent through it (tests/test_listen.py).
     "filler_baking_cutoff": ("filler_baking", {"keep_frac": 0.55}),
-    # am_adam holds a clear margin below smart-turn's 0.5 threshold after
-    # the int16 WAV round-trip (0.25); am_michael sat at ~0.5 and flipped
-    # with synthesis drift, breaking the held-turn tests.
-    "long_question_male": ("long_question", {"voice": "am_adam"}),
+    # The FULL long question in an alloy read the classifier holds
+    # (p=0.11) — the held-turn tests' answerable mood fixture. (The
+    # Kokoro-era am_adam mapping now renders through the echo voice and
+    # reads complete, so the hold comes from the voice, not the gender.)
+    "long_question_held": ("long_question", {"voice": "alloy"}),
 }
 
 

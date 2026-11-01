@@ -1,60 +1,106 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Parlor</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>ANI Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
 </head>
+
 <body>
 
-<header>
-  <div class="logo">
-    <div class="logo-mark"></div>
-    <h1>Parlor</h1>
-  </div>
-  <span class="model-label">{{model}}</span>
-  <div id="status" class="status-pill disconnected">Disconnected</div>
-</header>
-
-<div class="portal-stack">
-  <!-- Webcam viewport with glow layers -->
-  <div id="viewportWrap" class="viewport-wrap loading">
-    <div class="viewport-glow"></div>
-    <video id="video" autoplay muted playsinline></video>
-  </div>
-
-  <!-- Audio waveform visualizer -->
-  <div class="waveform-wrap">
-    <canvas id="waveform"></canvas>
-  </div>
-
-  <!-- Transcript -->
-  <div id="messages" class="transcript"></div>
-
-  <!-- Controls -->
-  <div class="controls">
-    <button id="cameraToggle" class="ctrl-btn active">Camera On</button>
-    <div id="modeChip" class="mode-chip" hidden>
-      <span id="modeLabel">Translating → English</span>
-      <button id="modeStop" class="mode-stop">stop</button>
+  <header>
+    <div class="logo">
+      <div class="logo-mark"></div>
+      <h1>ANI Assistant</h1>
     </div>
-    <div class="state-indicator">
-      <div id="stateDot" class="dot loading"></div>
-      <span id="stateText">Loading...</span>
-    </div>
-    <span class="on-device-pill">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="12" height="9" rx="2"/><path d="M5 4V3a3 3 0 0 1 6 0v1"/></svg>
-      On-device
-    </span>
-  </div>
-</div>
+    <span class="model-label">{{model}}</span>
+    <div id="status" class="status-pill disconnected">Disconnected</div>
+  </header>
 
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/bundle.min.js"></script>
-<script src="/static/app.js"></script>
+  <div class="portal-stack">
+    <!-- Camera preview collapses when camera access is off. -->
+    <div id="cameraPreview" class="camera-preview is-collapsed" role="region"
+      aria-label="Vista previa de cámara / Camera preview" aria-hidden="true" inert>
+      <div class="camera-preview-inner">
+        <div id="viewportWrap" class="viewport-wrap loading">
+          <div class="viewport-glow"></div>
+          <video id="video" autoplay muted playsinline></video>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+      <div class="persona-wrap">
+        <button id="personaChip" class="ctrl-btn"
+          title="Personality and voice of the assistant — switch it live">Personality</button>
+        <div id="personaPanel" class="persona-panel" hidden></div>
+      </div>
+      <button id="micToggle" class="ctrl-btn active"
+        title="Mute the mic — while muted, nothing you say is sent to the server">Mic On</button>
+      <button id="cameraToggle" class="ctrl-btn"
+        title="Turn the camera on/off — frames are only sent when it is on">Camera Off</button>
+      <div id="modeChip" class="mode-chip" hidden>
+        <span id="modeLabel">Translating → English</span>
+        <button id="modeStop" class="mode-stop">stop</button>
+      </div>
+      <div class="state-indicator">
+        <div id="stateDot" class="dot loading"></div>
+        <span id="stateText">Loading...</span>
+      </div>
+      <span class="on-device-pill">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="2" y="4" width="12" height="9" rx="2" />
+          <path d="M5 4V3a3 3 0 0 1 6 0v1" />
+        </svg>
+        {{model}}
+      </span>
+    </div>
+
+    <!-- Transcript -->
+    <div id="messages" class="transcript" tabindex="0"
+      aria-label="Conversación / Conversation"></div>
+
+
+
+    <form id="textForm" class="composer" aria-label="Enviar mensaje / Send a message">
+      <!-- Audio waveform visualizer -->
+      <div class="waveform-wrap">
+        <canvas id="waveform"></canvas>
+      </div>
+      <div>
+        <label class="sr-only" for="textInput">Mensaje / Message</label>
+        <textarea id="textInput" rows="1" disabled placeholder="Escribe / Type a message"
+          aria-label="Mensaje / Message"></textarea>
+        <button id="textSend" class="send-btn" type="submit" disabled aria-label="Enviar mensaje / Send message">Enviar
+          /
+          Send</button>
+      </div>
+      <div class="composer-options">
+        <label class="composer-option" for="speakReply">
+          <input id="speakReply" type="checkbox" checked disabled>
+          <span>Hablar respuesta / Speak reply</span>
+        </label>
+        <label id="textActionWrap" class="composer-option action-option" hidden>
+          <span>Acción / Action</span>
+          <select id="textAction" aria-label="Acción del mensaje / Message action" disabled>
+            <option value="translate">Traducir / Translate</option>
+            <option value="chat">Conversar / Chat</option>
+          </select>
+        </label>
+        <span id="textFormStatus" class="composer-status" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/bundle.min.js"></script>
+  <script src="/static/app.js"></script>
 </body>
+
 </html>

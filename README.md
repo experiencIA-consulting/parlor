@@ -1,6 +1,6 @@
 # Parlor
 
-Fully on-device, real-time multimodal AI, with features similar to [GPT-Live](https://openai.com/index/introducing-gpt-live/).
+Real-time multimodal AI (voice + vision, features similar to [GPT-Live](https://openai.com/index/introducing-gpt-live/)) on a **cloud LLM** — no local model downloads, no dedicated GPU. This fork talks to **OpenAI / OpenRouter** (any OpenAI-compatible endpoint) instead of running llama.cpp on-device.
 
 https://github.com/user-attachments/assets/0833b0ec-9e48-46dc-9fde-c3ac4a70abf9
 
@@ -27,97 +27,99 @@ Browser (mic + camera)
     │
     │  WebSocket (audio PCM + JPEG frames)
     ▼
-FastAPI server
-    ├── smart-turn-v3 (~20ms)                   →  did you finish your thought?
-    ├── Gemma 4 E4B via llama.cpp (QAT q4_0)    →  hears + sees, streams the reply
-    │     └── action head (same model, JSON)    →  timers · modes · research
-    ├── Kokoro TTS (MLX on Mac, ONNX on Linux)  →  speaks sentence-by-sentence
-    └── background reasoner (optional)          →  frontier model for web research
+FastAPI server (conversation history, modes, timers — all server-owned)
+    ├── smart-turn-v3 (~0.2s, tiny local classifier)    →  did you finish your thought?
+    ├── OpenAI speech-to-text                          →  what did you say? (transcript first)
+    ├── Any OpenAI-compatible chat endpoint            →  streams the reply (text + vision)
+    │     └── action head (structured-JSON request)    →  timers · modes · research
+    ├── OpenAI text-to-speech                          →  speaks sentence-by-sentence
+    └── background reasoner (optional)                 →  frontier model for web research
     │
     │  WebSocket (transcript + streamed audio chunks)
     ▼
 Browser (playback + transcript)
 ```
 
-- **Background research** (optional). "Find the best pizza in Rome right now" hands the task to a frontier model on any OpenAI-compatible endpoint (OpenRouter + web search by default) while the conversation continues; the answer is spoken when it arrives. Off unless `REASONER_API_KEY` is set — without it Parlor stays fully on-device.
+- **Cloud backend.** No local model downloads and no GPU needed: the LLM is any OpenAI-compatible endpoint (api.openai.com directly, or OpenRouter with any vendor's model), and speech rides OpenAI's transcription (STT) and speech (TTS) APIs.- **Background research** (optional). "Find the best pizza in Rome right now" hands the task to a frontier model while the conversation continues; the answer is spoken when it arrives. With no extra config it rides the main OpenAI key (web-search-enabled model); a dedicated `REASONER_*` config lets it run on OpenRouter plus web search.
 - **Hands-free turn-taking.** Browser-side [Silero VAD](https://github.com/ricky0123/vad) with a ~200ms silence cutoff — no push-to-talk. Pipecat's [smart-turn-v3](https://huggingface.co/pipecat-ai/smart-turn-v3) then judges whether you actually finished your thought: mid-thought pauses are held silently until you continue, or answered once you stay quiet.
-- **Everything streams.** The reply opens with a transcript of what was heard (on screen immediately — committing to it first measurably improves accuracy), then is spoken sentence-by-sentence while still generating. Your camera frame and speech are pushed through llama.cpp's prompt cache while you're still talking, so even long questions start answering almost instantly.
-- **Barge-in.** Speak over the AI to interrupt it; generation is aborted server-side. Echo is handled without the browser's echo canceller — or just wear headphones.
-- **Actions never ride the speech.** Timers, mode switches, and research requests are decided by a separate grammar-forced JSON request over the same prompt cache, hidden under TTS playback. The spoken reply stays pure speech, so control markup can never leak into TTS and a promise made aloud is always kept (recall 1.0 vs 0.955 for in-band tags — `benchmarks/archbench.py`).
-- **Timers.** "Set a timer for three minutes for the pasta" — the server owns the clock (a turn-based model can't ring into silence — `benchmarks/timerprobe.py`), the model announces the ring out loud in any mode, and a countdown chip with a cancel button tracks it.
-- **Live translation mode.** "Translate everything I say into English" turns Parlor into a consecutive interpreter: each utterance rendered after a short silence, no conversational replies, in any language Gemma understands — until you say "stop translating" or hit the stop chip.
+- **Everything streams.** The utterance is transcribed and the transcript is on screen immediately, then the reply is spoken sentence-by-sentence while the model is still generating.
+- **Live personalities.** The "Personality" chip switches the assistant mid-conversation: curated presets (La Narradora, El Profesor, un robot plano, un presentador de noticias…) each bundling an OpenAI TTS timbre, speech-delivery instructions (tone/pace/emotion) and a chat-persona clause. Press ▶ to hear a two-second sample before switching; the choice persists per browser.
+- **Barge-in.** Speak over the AI to interrupt it; generation is aborted server-side (the streaming connection is torn down). Echo is handled without the browser's echo canceller — or just wear headphones.
+- **Actions never ride the speech.** Timers, mode switches, and research requests are decided by a separate structured-JSON request over the same chat endpoint, hidden under TTS playback. The spoken reply stays pure speech, so control markup can never leak into TTS and a promise made aloud is always kept.
+- **Timers.** "Set a timer for three minutes for the pasta" — the server owns the clock, the model announces the ring out loud in any mode, and a countdown chip with a cancel button tracks it.
+- **Live translation mode.** "Translate everything I say into English" turns Parlor into a consecutive interpreter: each utterance rendered after a short silence, no conversational replies, in any language the STT hears — until you say "stop translating" or hit the stop chip.
 - **Just-listen mode.** "Just listen for a while, I want to think out loud" makes it a silent scribe: every utterance transcribed on screen, nothing spoken back, until you address it again.
 - **A sense of time.** The model is told how much quiet preceded a turn, how long research took, and when the session started — so "how long was I gone?" gets a real answer.
 
 ## Requirements
 
 - Python 3.12+
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) (`brew install llama.cpp` on macOS; other platforms: [install guide](https://github.com/ggml-org/llama.cpp/blob/master/docs/install.md)). Needs build b9503 (June 2026) or newer, b9512 for `MODEL=12b` — older builds lack Gemma 4 audio or crash loading its mmproj
-- macOS with Apple Silicon, or Linux with a supported GPU
-- ~6 GB free RAM for the default E4B model (`MODEL=e2b` fits in ~4 GB)
+- An [OpenAI API key](https://platform.openai.com/) in `.env` (or any OpenAI-compatible endpoint + a second provider for speech; see [docs/configuration.md](docs/configuration.md))
+- No GPU, no model downloads: the only fetch at startup is the ~3 MB smart-turn classifier
+- Works on macOS, Linux, and Windows
+
+Voice conversation with the defaults (gpt-4o-mini + OpenAI speech APIs) costs on the order of **1–2 cents per minute** of talking, dominated by transcription and speech synthesis; bigger chat models scale that up.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/fikrikarim/parlor.git
+git clone https://github.com/experiencIA-consulting/parlor.git
 cd parlor
 
-# Install uv and llama.cpp if you don't have them
-curl -LsSf https://astral.sh/uv/install.sh | sh
-brew install llama.cpp
-
+# Install uv if you don't have it (https://docs.astral.sh/uv/):
+#   Windows: powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 uv sync
+
+# One-time: put your OpenAI key in .env
+cp .env.example .env      # then edit: OPENAI_API_KEY=sk-...
+# OpenRouter instead:
+#   OPENAI_BASE_URL=https://openrouter.ai/api/v1
+#   OPENAI_MODEL=openai/gpt-4o-mini
+
 uv run parlor
 ```
 
-Open [http://localhost:8000](http://localhost:8000), grant camera and microphone access, and start talking.
-
-Models are downloaded automatically on first run (~5.7 GB for Gemma 4 E4B QAT + its multimodal projector, plus TTS models).
+Open [http://localhost:8000](http://localhost:8000), grant microphone access, and start talking — the camera stays off (no tokens spent on frames) until you switch it on with the **Camera** toggle. The only download at startup is the ~3 MB smart-turn classifier.
 
 ## Configuration
 
 Set these in your shell or a `.env` at the repo root. The common ones:
 
-| Variable           | Default                        | Description                                    |
-| ------------------ | ------------------------------ | ---------------------------------------------- |
-| `MODEL`            | `e4b`                          | Gemma 4 size: `e2b` (fastest), `e4b` (better answers, ~1.8x e2b latency), `12b` (needs ~8GB) |
-| `PORT`             | `8000`                         | Server port                                    |
-| `REASONER_API_KEY` | (unset — research off)         | API key enabling background research           |
-| `REASONER_BASE_URL`| `https://openrouter.ai/api/v1` | Any OpenAI-compatible chat endpoint            |
-| `REASONER_MODEL`   | `openai/gpt-5.6-luna`          | Model the endpoint should run                  |
+| Variable            | Default                        | Description                                         |
+| ------------------- | ------------------------------ | --------------------------------------------------- |
+| `OPENAI_API_KEY`    | (required)                     | API key for the chat endpoint                       |
+| `OPENAI_BASE_URL`   | `https://api.openai.com/v1`    | Any OpenAI-compatible chat endpoint (OpenRouter: `https://openrouter.ai/api/v1`) |
+| `OPENAI_MODEL`      | `gpt-4o-mini`                  | Conversation model (must accept images for camera)  |
+| `PORT`              | `8000`                         | Server port                                         |
+| `REASONER_API_KEY`  | (falls back to the chat key)   | API key enabling background research                |
 
-The full list — local model paths, llama.cpp tuning, TTS backend, test hooks — is in [docs/configuration.md](docs/configuration.md).
+The full list — STT/TTS models, voice, Spanish-pinned STT, history rotation, reasoner, test hooks — is in [docs/configuration.md](docs/configuration.md).
 
-## Performance (Apple M3 Pro)
+## Latency
 
-Measured with `MODEL=e2b` from end of utterance to first audio heard (add ~200ms of VAD silence detection on top; the default E4B is roughly 1.8x these numbers, with noticeably better answers). The camera frame and the speech itself are prefilled while you're still speaking, and the reply opens with the transcript line (its decode time is included below — the price of accurate transcripts):
-
-| Turn                                  | First audio | Turn complete |
-| ------------------------------------- | ----------- | ------------- |
-| Short question (~2s speech)           | ~0.7s       | ~1.3s         |
-| Short question + camera               | ~0.8s       | ~1.3s         |
-| Long question (~9s speech), streamed  | ~1.3-1.4s   | ~2.1-2.3s     |
-| Long question + camera                | ~1.5s       | ~2.3s         |
-
-Reproduce with the end-to-end benchmark (real spoken audio, synthesized locally). Run it before and after a change to see the impact:
-
-```bash
-uv run parlor                    # terminal 1
-uv run python benchmarks/bench.py --label before --out benchmarks/results/before.json   # terminal 2
-# ...make changes, restart the server...
-uv run python benchmarks/bench.py --label after --out benchmarks/results/after.json
-uv run python benchmarks/compare.py benchmarks/results/before.json benchmarks/results/after.json
-```
+First audio = VAD silence (~200ms) + smart-turn (~200ms) + STT (~0.3-1s, grows with utterance length) + chat first token + TTS (~0.5s). Expect roughly 1.5-3s on a typical short question, depending on your distance to OpenAI and the model you point at.
 
 ## Testing
 
-An end-to-end suite spawns the real server (llama.cpp, TTS, turn detector)
-and drives it over WebSocket with synthesized speech — including degraded
-audio (clipped word endings, noise, other voices) that reproduces live-mic
-failure modes:
+An end-to-end suite spawns the real server (cloud LLM, STT, TTS, turn
+detector) and drives it over WebSocket with synthesized speech — including
+degraded audio (clipped word endings, noise, other voices) that reproduces
+live-mic failure modes. The reasoner endpoint is mocked locally; chat, STT
+and TTS consume a real OpenAI key
+(`OPENAI_API_KEY` must be set to run the full suite; unit tests run
+without):
 
 ```bash
-uv run pytest            # ~1 minute + model load
+uv run pytest
+```
+
+On Windows, `dev.cmd` wraps the server lifecycle (start/stop/restart/status/logs, detached with logs, LAN binding by default) so you don't have to remember the PowerShell one-liners:
+
+```powershell
+.\dev.cmd            # restart (default)
+.\dev.cmd start      # detached: survives the terminal, logs to server.log
+.\dev.cmd status     # port + HTTP probe
+.\dev.cmd logs       # tail the log
 ```
 
 Set `PARLOR_TEST_URL=ws://localhost:8000/ws` to run it against an
@@ -129,13 +131,13 @@ feel, multilingual speech) still needs a live mic and ears.
 ```
 src/parlor/
 ├── server.py              # FastAPI app + per-connection conversation loop
-├── llama.py               # llama-server lifecycle + chat API client
+├── cloud.py               # OpenAI-compatible backend: chat, streaming, STT
 ├── pipeline.py            # Streaming turn pipeline (decode → sentences → TTS)
-├── actions.py             # Action decider (grammar-forced JSON: timers, modes, research)
+├── actions.py             # Action decider (structured JSON: timers, modes, research)
 ├── reasoner.py            # Background research delegation (OpenAI-compatible)
 ├── modes.py               # Session modes (conversation, translate, listen)
 ├── turn_detector.py       # smart-turn-v3 end-of-turn classifier
-├── tts.py                 # Platform-aware TTS (MLX on Mac, ONNX on Linux)
+├── tts.py                 # Cloud TTS (OpenAI speech; Kokoro retained behind TTS_BACKEND=kokoro)
 └── web/                   # Frontend (markup, styles, app logic: VAD, camera, playback)
 tests/                     # End-to-end test suite (uv run pytest)
 benchmarks/
@@ -150,9 +152,8 @@ benchmarks/
 
 ## Acknowledgments
 
-- [Gemma 4](https://ai.google.dev/gemma) by Google DeepMind
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) by Georgi Gerganov and contributors
-- [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) TTS by Hexgrad
+- [OpenAI](https://platform.openai.com/docs) APIs — chat, transcription, speech
+- [OpenRouter](https://openrouter.ai) — any frontier model behind one OpenAI-compatible endpoint
 - [Silero VAD](https://github.com/snakers4/silero-vad) for browser voice activity detection
 - [smart-turn-v3](https://huggingface.co/pipecat-ai/smart-turn-v3) end-of-turn detection by Pipecat
 

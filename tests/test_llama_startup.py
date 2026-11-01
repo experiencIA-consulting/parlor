@@ -1,9 +1,15 @@
 """Unit tests for llama-server discovery and the Gemma 4 build floor —
-stub binaries on PATH, no real llama.cpp involved."""
+stub binaries on PATH, no real llama.cpp involved.
+
+KEPT for the on-device edition (llama.py lives on in-tree as a fallback);
+they are skipped in the cloud build, where llama.py is never started and
+the /bin/sh stubs would not resolve on Windows anyway."""
 
 import stat
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="llama.cpp backend unused in the cloud edition")
 
 from parlor import llama
 
