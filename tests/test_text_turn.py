@@ -141,6 +141,29 @@ def test_run_turn_can_stream_text_without_calling_tts(monkeypatch):
     assert ws.sent[-1]["spoke"] is False
 
 
+def test_websocket_text_turn_with_speech_disabled_emits_no_audio(monkeypatch):
+    ws = FakeWebSocket([{
+        "type": "text_turn", "request_id": "no-audio",
+        "text": "Answer in text only.", "speak_reply": False,
+    }])
+    monkeypatch.setattr(server.reasoner, "enabled", lambda: False)
+    monkeypatch.setattr(server, "tts_backend", NoTTS())
+    monkeypatch.setattr(server.actions, "decide_after", lambda *_: server.actions.NONE)
+    monkeypatch.setattr(server.cloud, "transcribe",
+                        lambda *_: pytest.fail("typed turn called STT"))
+    monkeypatch.setattr("parlor.pipeline.cloud.ChatStream", FakeChatStream)
+
+    asyncio.run(server.websocket_endpoint(ws))
+
+    kinds = [message["type"] for message in ws.sent]
+    assert "text_delta" in kinds
+    assert "turn_final" in kinds
+    assert not {"audio_start", "audio_chunk", "audio_end"}.intersection(kinds)
+    final = next(message for message in ws.sent if message["type"] == "turn_final")
+    assert final["spoke"] is False
+    assert final["output"] == "text"
+
+
 def test_failed_text_turn_retry_reuses_history_entry(monkeypatch):
     payload = {"type": "text_turn", "request_id": "retry-me",
                "text": "Keep this message", "speak_reply": False}

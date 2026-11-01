@@ -508,6 +508,7 @@ function submitTextTurn(event) {
     request_id: requestId,
     text,
     speak_reply: speakReply.checked,
+    speak: speakReply.checked, // Compatibility with a server process using the previous field.
     response_style: sessionMode === 'translate' ? textAction.value : 'chat',
   };
   const image = captureFrame();
