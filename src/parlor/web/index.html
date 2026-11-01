@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>ANI Voice Service</title>
+  <title>ANI Assistant</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -16,26 +16,23 @@
   <header>
     <div class="logo">
       <div class="logo-mark"></div>
-      <h1>ANI Voice Service</h1>
+      <h1>ANI Assistant</h1>
     </div>
     <span class="model-label">{{model}}</span>
     <div id="status" class="status-pill disconnected">Disconnected</div>
   </header>
 
   <div class="portal-stack">
-    <!-- Webcam viewport with glow layers -->
-    <div id="viewportWrap" class="viewport-wrap loading">
-      <div class="viewport-glow"></div>
-      <video id="video" autoplay muted playsinline></video>
+    <!-- Camera preview collapses when camera access is off. -->
+    <div id="cameraPreview" class="camera-preview is-collapsed" role="region"
+      aria-label="Vista previa de cámara / Camera preview" aria-hidden="true" inert>
+      <div class="camera-preview-inner">
+        <div id="viewportWrap" class="viewport-wrap loading">
+          <div class="viewport-glow"></div>
+          <video id="video" autoplay muted playsinline></video>
+        </div>
+      </div>
     </div>
-
-    <!-- Audio waveform visualizer -->
-    <div class="waveform-wrap">
-      <canvas id="waveform"></canvas>
-    </div>
-
-    <!-- Transcript -->
-    <div id="messages" class="transcript"></div>
 
     <!-- Controls -->
     <div class="controls">
@@ -65,12 +62,24 @@
       </span>
     </div>
 
+    <!-- Transcript -->
+    <div id="messages" class="transcript"></div>
+
+
+
     <form id="textForm" class="composer" aria-label="Enviar mensaje / Send a message">
-      <label class="sr-only" for="textInput">Mensaje / Message</label>
-      <textarea id="textInput" rows="1" disabled placeholder="Escribe / Type a message"
-        aria-label="Mensaje / Message"></textarea>
-      <button id="textSend" class="send-btn" type="submit" disabled aria-label="Enviar mensaje / Send message">Enviar /
-        Send</button>
+      <!-- Audio waveform visualizer -->
+      <div class="waveform-wrap">
+        <canvas id="waveform"></canvas>
+      </div>
+      <div>
+        <label class="sr-only" for="textInput">Mensaje / Message</label>
+        <textarea id="textInput" rows="1" disabled placeholder="Escribe / Type a message"
+          aria-label="Mensaje / Message"></textarea>
+        <button id="textSend" class="send-btn" type="submit" disabled aria-label="Enviar mensaje / Send message">Enviar
+          /
+          Send</button>
+      </div>
       <div class="composer-options">
         <label class="composer-option" for="speakReply">
           <input id="speakReply" type="checkbox" checked disabled>

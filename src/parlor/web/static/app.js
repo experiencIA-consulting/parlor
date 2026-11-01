@@ -7,6 +7,7 @@ const speakReply = $('speakReply'), textActionWrap = $('textActionWrap');
 const textAction = $('textAction'), textFormStatus = $('textFormStatus');
 const stateDot = $('stateDot'), stateText = $('stateText');
 const viewportWrap = $('viewportWrap');
+const cameraPreview = $('cameraPreview');
 const waveformCanvas = $('waveform');
 const waveformCtx = waveformCanvas.getContext('2d');
 
@@ -771,6 +772,10 @@ function setCameraUI() {
   cameraToggle.classList.toggle('active', cameraEnabled);
   cameraToggle.textContent = cameraEnabled ? 'Camera On' : 'Camera Off';
   video.style.opacity = cameraEnabled ? 1 : 0.3;
+  cameraPreview.classList.toggle('is-open', cameraEnabled);
+  cameraPreview.classList.toggle('is-collapsed', !cameraEnabled);
+  cameraPreview.setAttribute('aria-hidden', String(!cameraEnabled));
+  cameraPreview.inert = !cameraEnabled;
 }
 
 // Acquire the video track on demand (must run inside the click's user

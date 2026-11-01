@@ -161,6 +161,37 @@
     min-height: 0;
   }
 
+  /* ── Collapsible camera preview ── */
+  .camera-preview {
+    display: grid;
+    grid-template-rows: 1fr;
+    width: 100%;
+    max-width: 640px;
+    opacity: 1;
+    transform: translateY(0);
+    visibility: visible;
+    transition: grid-template-rows 0.32s ease, opacity 0.24s ease,
+      transform 0.32s ease, visibility 0s;
+  }
+
+  .camera-preview.is-collapsed {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-8px);
+    visibility: hidden;
+    pointer-events: none;
+    transition: grid-template-rows 0.32s ease, opacity 0.24s ease,
+      transform 0.32s ease, visibility 0s linear 0.32s;
+  }
+
+  .camera-preview-inner {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   /* ── Webcam viewport ── */
   .viewport-wrap {
     position: relative;
@@ -724,4 +755,12 @@
     .transcript { min-height: 80px; }
     .controls { padding-top: 6px; }
     .composer { padding-top: 6px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .camera-preview,
+    .camera-preview.is-collapsed {
+      transition: none;
+      transform: none;
+    }
   }
