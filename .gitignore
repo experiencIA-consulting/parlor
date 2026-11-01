@@ -38,5 +38,3 @@ pytest-of-*/
 server.log
 server.err.log
 /docs/*
-/docs/ANI_consumoAPI.txt
-/docs/respuesta.json
