@@ -811,11 +811,14 @@ async def websocket_endpoint(ws: WebSocket):
                         or response_style not in {"translate", "chat"}):
                     response_style = "translate" if mode.name == "translate" else "chat"
                 msg["response_style"] = response_style
-                msg["speak"] = (existing["speak"] if existing else
-                                msg.get("speak", True) is True)
+                # Speaking is opt-in on every typed request. A missing or
+                # non-boolean field must never silently enable paid TTS.
+                requested_speech = msg.get("speak_reply", msg.get("speak"))
+                msg["speak_reply"] = (existing["speak_reply"] if existing else
+                                      requested_speech is True)
                 if existing and (existing["text"] != text
                                  or existing["response_style"] != msg["response_style"]
-                                 or existing["speak"] != msg["speak"]
+                                 or existing["speak_reply"] != msg["speak_reply"]
                                  or existing["image"] != msg.get("image")):
                     await send_json(ws, {
                         "type": "turn_error", "request_id": request_id,
@@ -1024,7 +1027,7 @@ async def websocket_endpoint(ws: WebSocket):
                             "user_msg": user_msg,
                             "text": msg["text"],
                             "response_style": msg["response_style"],
-                            "speak": msg["speak"],
+                            "speak_reply": msg["speak_reply"],
                             "image": msg.get("image"),
                             "completed": False,
                         }
@@ -1043,7 +1046,7 @@ async def websocket_endpoint(ws: WebSocket):
                     # guard; comparing a legitimate written answer (e.g.
                     # an exact translation) to its prompt can suppress it.
                     instruction="" if is_text_turn else instruction,
-                    tts_enabled=msg["speak"] if is_text_turn else True,
+                    tts_enabled=msg["speak_reply"] if is_text_turn else True,
                     request_id=msg["request_id"] if is_text_turn else None)
                 if is_text_turn:
                     text_turn_completed = True

@@ -133,6 +133,7 @@ Tres iteraciones de economía de tokens / privacidad / expresividad sobre el mis
 
 ### Estado al 2026-11-01
 
-- Implementados el formulario, los eventos `text_turn`/`turn_error`, la traducción por mensaje, el control de TTS, las etiquetas de canal y el reintento idempotente dentro de la sesión.
+- Implementados el formulario, los eventos `text_turn`/`turn_error`, la traducción por mensaje, el control de TTS por petición (`speak_reply`, opt-in fail-closed), las etiquetas de canal y el reintento idempotente dentro de la sesión.
+- Corrección de pruebas manuales: el body vuelve a permitir scroll y el composer queda sticky; el servidor interpreta `speak_reply` en cada petición escrita (ausente = no TTS) y acepta el campo antiguo `speak` para clientes cacheados.
 - Validación local sin APIs reales: **39 passed** en `test_text_turn.py`, `test_stream_parser.py`, `test_personas.py`, `test_reasoner.py` y `test_bind.py`; `node --check` y compilación Python también pasan.
 - Pendiente validar manualmente la interfaz en navegador/móvil. Una ejecución parcial de pruebas e2e que consume APIs reales tuvo un fallo en `test_spoken_command_exits_listen_and_conversation_resumes`; no se repitió para evitar más coste. La suite e2e completa no se ejecutó.

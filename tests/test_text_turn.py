@@ -44,8 +44,12 @@ def test_text_turn_skips_stt_and_stores_message_once(
         payloads.append({"type": "set_mode", "mode": mode})
     payloads.extend([
         {"type": "text_turn", "request_id": "typed-1", "text": "Hola",
-         "speak": False, "response_style": style, "image": "aW1hZ2U="},
+         "speak_reply": False, "response_style": style, "image": "aW1hZ2U="},
         {"type": "text_turn", "request_id": "typed-2", "text": "¿Y esto?",
+         "response_style": style},
+        {"type": "text_turn", "request_id": "typed-3", "text": "Say it aloud",
+         "speak_reply": True, "response_style": style},
+        {"type": "text_turn", "request_id": "typed-4", "text": "Legacy client",
          "speak": False, "response_style": style},
     ])
     ws = FakeWebSocket(payloads)
@@ -72,7 +76,7 @@ def test_text_turn_skips_stt_and_stores_message_once(
 
     asyncio.run(server.websocket_endpoint(ws))
 
-    assert len(turn_inputs) == 2
+    assert len(turn_inputs) == 4
     first_messages, first_kwargs = turn_inputs[0]
     first_user = first_messages[-1]
     first_content = first_user["content"]
@@ -90,6 +94,9 @@ def test_text_turn_skips_stt_and_stores_message_once(
     prior_user = second_messages[-3]
     assert [p.get("text") for p in prior_user["content"] if p["type"] == "text"].count("Hola") == 1
     assert any(m.get("request_id") == "typed-2" for m in ws.sent)
+    assert turn_inputs[1][1]["tts_enabled"] is False  # missing flag is fail-closed
+    assert turn_inputs[2][1]["tts_enabled"] is True
+    assert turn_inputs[3][1]["tts_enabled"] is False  # compatibility with cached clients
     assert not any(m["type"] == "transcript" for m in ws.sent)
 
 
@@ -136,7 +143,7 @@ def test_run_turn_can_stream_text_without_calling_tts(monkeypatch):
 
 def test_failed_text_turn_retry_reuses_history_entry(monkeypatch):
     payload = {"type": "text_turn", "request_id": "retry-me",
-               "text": "Keep this message", "speak": False}
+               "text": "Keep this message", "speak_reply": False}
     ws = FakeWebSocket([payload, payload])
     calls = []
 

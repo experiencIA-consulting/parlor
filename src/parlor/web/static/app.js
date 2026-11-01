@@ -507,7 +507,7 @@ function submitTextTurn(event) {
     type: 'text_turn',
     request_id: requestId,
     text,
-    speak: speakReply.checked,
+    speak_reply: speakReply.checked,
     response_style: sessionMode === 'translate' ? textAction.value : 'chat',
   };
   const image = captureFrame();
