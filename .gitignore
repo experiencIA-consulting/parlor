@@ -37,3 +37,4 @@ pytest-of-*/
 # Servidor lanzado en background (logs de ejecución)
 server.log
 server.err.log
+/docs/configuration.md
