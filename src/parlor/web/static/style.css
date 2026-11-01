@@ -29,9 +29,8 @@
     font-family: var(--font-body);
     background: var(--c-bg);
     color: var(--c-text);
-    min-height: 100vh;   /* fallback for browsers without dvh */
-    min-height: 100dvh;  /* account for the mobile browser's dynamic viewport */
-    height: auto;
+    height: 100vh;   /* fallback for browsers without dvh */
+    height: 100dvh;  /* keep conversation scrolling inside #messages */
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -147,7 +146,7 @@
 
   /* ── Main stack ── */
   .portal-stack {
-    flex: 1 0 auto;
+    flex: 1 1 0;
     width: 100%;
     max-width: 720px;
     display: flex;
@@ -302,21 +301,28 @@
     max-width: 640px;
     flex: 1;
     min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
     margin-top: 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 0 4px 4px;
     scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,0.08) transparent;
+    scrollbar-gutter: stable;
+    scrollbar-color: rgba(255,255,255,0.3) rgba(255,255,255,0.035);
     mask-image: linear-gradient(to bottom, transparent 0%, black 12px, black 100%);
     -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12px, black 100%);
   }
 
-  .transcript::-webkit-scrollbar { width: 4px; }
-  .transcript::-webkit-scrollbar-track { background: transparent; }
-  .transcript::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+  .transcript:focus-visible { outline: 1px solid rgba(255,255,255,0.2); outline-offset: 2px; }
+  .transcript::-webkit-scrollbar { width: 8px; }
+  .transcript::-webkit-scrollbar-track { background: rgba(255,255,255,0.035); border-radius: 6px; }
+  .transcript::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius: 6px; }
+  .transcript::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.48); }
 
   .msg {
     position: relative;

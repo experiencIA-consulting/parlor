@@ -10,6 +10,17 @@ const viewportWrap = $('viewportWrap');
 const cameraPreview = $('cameraPreview');
 const waveformCanvas = $('waveform');
 const waveformCtx = waveformCanvas.getContext('2d');
+let followLatestMessage = true;
+
+messagesDiv.addEventListener('scroll', () => {
+  const remaining = messagesDiv.scrollHeight - messagesDiv.clientHeight - messagesDiv.scrollTop;
+  followLatestMessage = remaining < 32;
+});
+
+function scrollMessagesToLatest(force = false) {
+  if (force) followLatestMessage = true;
+  if (followLatestMessage) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
 
 let ws, mediaStream, myvad;
 // The camera is OPT-IN (token economy, cloud era): every eyes-on turn pays
@@ -363,7 +374,7 @@ function appendAssistantText(text, requestId = null) {
   }
   if (requestId) currentAssistantEl.dataset.requestId = requestId;
   currentAssistantBodyEl.textContent += text;
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  scrollMessagesToLatest();
 }
 
 function setAssistantMeta(text) {
@@ -609,7 +620,7 @@ function addDelegationChip(id, task) {
   div.innerHTML = `${LOADING_DOTS}<span class="task"></span>`;
   div.querySelector('.task').textContent = task;
   messagesDiv.appendChild(div);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  scrollMessagesToLatest();
   delegationChips.set(id, div);
 }
 
@@ -632,7 +643,7 @@ function addTimerChip(id, label, seconds) {
   div.querySelector('.task').textContent = label;
   div.querySelector('.timer-cancel').onclick = () => wsSend({ type: 'cancel_timer', id });
   messagesDiv.appendChild(div);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  scrollMessagesToLatest();
   timerChips.set(id, { el: div, deadline: Date.now() + seconds * 1000 });
   if (!timerTicker) timerTicker = setInterval(tickTimers, 500);
   tickTimers();
@@ -1144,7 +1155,7 @@ function addMessage(role, text, meta) {
     div.appendChild(metaEl);
   }
   messagesDiv.appendChild(div);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  scrollMessagesToLatest(role === 'user');
   return div;
 }
 
